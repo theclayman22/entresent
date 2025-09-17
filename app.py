@@ -34,8 +34,8 @@ if "debug_mode" not in st.session_state:
 # --- Shared instruction (Playground-style "developer" content) -----------------
 def playground_developer_instruction() -> str:
     """
-    This mirrors your working Responses API "developer" text from the Playground.
-    We reuse it for GPT-5 (Responses) and for DeepSeek (as a system message).
+    Mirrors your working Responses API developer text from the Playground.
+    Reused for GPT-5 (Responses) and for DeepSeek (as a system message).
     """
     return (
         "Analyze the sentiment of the provided text and score its positive, negative, and neutral "
@@ -81,6 +81,32 @@ def _safe_json_loads(s: str) -> Dict[str, float]:
         "negative": _clip01(data.get("negative", 0.0)),
         "neutral": _clip01(data.get("neutral", 0.0)),
     }
+
+
+def _responses_text(resp) -> str:
+    """
+    Robustly extract text from a Responses API result.
+    Prefers resp.output_text, falls back to walking resp.output.
+    """
+    try:
+        if getattr(resp, "output_text", None):
+            return resp.output_text
+    except Exception:
+        pass
+    try:
+        chunks: List[str] = []
+        for item in (getattr(resp, "output", []) or []):
+            if getattr(item, "type", "") == "message":
+                for c in (getattr(item, "content", []) or []):
+                    ctype = getattr(c, "type", "")
+                    if ctype in ("output_text", "text"):
+                        chunks.append(getattr(c, "text", "") or "")
+        if chunks:
+            return "".join(chunks)
+    except Exception:
+        pass
+    # Last-ditch: stringify (debug only)
+    return ""
 
 
 # --- Core analyzer -------------------------------------------------------------
@@ -195,8 +221,6 @@ class SentimentAnalyzer:
                 for label, score in zip(blob["labels"], blob["scores"]):
                     if label in scores_map:
                         scores_map[label] = _clip01(float(score))
-
-            # Return in the exact JSON shape expected by your Playground prompt
             return {"positive": scores_map["positive"], "negative": scores_map["negative"], "neutral": scores_map["neutral"]}
 
         except Exception as e:
@@ -209,7 +233,7 @@ class SentimentAnalyzer:
     def analyze_deepseek(self, text: str, api_key: str) -> Dict[str, float]:
         """
         Analyze sentiment using DeepSeek.
-        We reuse the exact Playground instruction as a **system** message,
+        We reuse the Playground instruction as a **system** message,
         and ask for JSON only. Output is parsed and clipped to [0,1].
         """
         try:
@@ -220,7 +244,7 @@ class SentimentAnalyzer:
             client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
             instruction = playground_developer_instruction()
-            user_text = f'Text: {text[:1000]}'
+            user_text = f"Text: {text[:1000]}"
 
             resp = client.chat.completions.create(
                 model="deepseek-chat",
@@ -245,7 +269,7 @@ class SentimentAnalyzer:
     def analyze_gpt5nano(self, text: str, api_key: str) -> Dict[str, float]:
         """
         Analyze sentiment using OpenAI GPT-5 nano via **Responses** API,
-        matching your Playground configuration and prompt style.
+        matching the Playground configuration, and enforcing JSON via json_schema.
         """
         try:
             if not api_key:
@@ -253,47 +277,45 @@ class SentimentAnalyzer:
                 return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
 
             client = OpenAI(api_key=api_key)
-
             instruction = playground_developer_instruction()
+
+            # Enforce structured output with a JSON schema
+            schema = {
+                "name": "SentimentScores",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "positive": {"type": "number", "minimum": 0, "maximum": 1},
+                        "negative": {"type": "number", "minimum": 0, "maximum": 1},
+                        "neutral":  {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                    "required": ["positive", "negative", "neutral"],
+                    "additionalProperties": False,
+                },
+            }
 
             include_list = ["reasoning.encrypted_content"] if st.session_state.debug_mode else []
 
             resp = client.responses.create(
                 model="gpt-5-nano",
                 input=[
-                    {
-                        "role": "developer",
-                        "content": [{"type": "input_text", "text": instruction}],
-                    },
-                    {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": f"Text: {text[:1000]}"}],
-                    },
+                    {"role": "developer", "content": [{"type": "input_text", "text": instruction}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": f"Text: {text[:1000]}"}]},
                 ],
-                text={"format": {"type": "text"}, "verbosity": "low"},  # mirror Playground; we still enforce JSON by instruction
+                text={"format": {"type": "json_schema", "json_schema": schema}, "verbosity": "low"},
                 reasoning={"effort": "low"},
                 tools=[],
                 store=False,
                 include=include_list,
-                max_output_tokens=80,  # ✅ Responses API uses max_output_tokens
+                max_output_tokens=120,
+                temperature=0.0,
             )
 
-            # Robust extraction for Responses API
-            out = ""
-            # Prefer output_text if present
-            if hasattr(resp, "output_text") and resp.output_text:
-                out = resp.output_text
-            else:
-                # Walk the structured "output" items (future-proof)
-                chunks: List[str] = []
-                for item in getattr(resp, "output", []) or []:
-                    if getattr(item, "type", "") == "message":
-                        for c in getattr(item, "content", []) or []:
-                            if getattr(c, "type", "") in ("output_text", "text"):
-                                chunks.append(getattr(c, "text", "") or "")
-                out = "".join(chunks)
+            out = _responses_text(resp).strip()
+            if st.session_state.debug_mode:
+                st.code(f"GPT-5 nano output_text:\n{out}")
 
-            return _safe_json_loads((out or "").strip())
+            return _safe_json_loads(out)
 
         except Exception as e:
             st.error(f"GPT-5 nano analysis failed: {e}")
@@ -426,7 +448,7 @@ def main() -> None:
 
         with st.expander("🔧 Advanced Settings", expanded=False):
             debug_mode = st.checkbox(
-                "Enable Debug Mode", value=False, help="Show detailed API responses for troubleshooting"
+                "Enable Debug Mode", value=False, help="Show raw outputs and tracebacks for troubleshooting"
             )
             st.session_state.debug_mode = debug_mode
 
