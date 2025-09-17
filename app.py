@@ -31,6 +31,33 @@ if "results" not in st.session_state:
 if "debug_mode" not in st.session_state:
     st.session_state.debug_mode = False
 
+# --- Shared instruction (Playground-style "developer" content) -----------------
+def playground_developer_instruction() -> str:
+    """
+    This mirrors your working Responses API "developer" text from the Playground.
+    We reuse it for GPT-5 (Responses) and for DeepSeek (as a system message).
+    """
+    return (
+        "Analyze the sentiment of the provided text and score its positive, negative, and neutral "
+        "sentiment independently.\n\n"
+        "- For a given input text, output only a JSON object with the following structure "
+        '(do not include any explanations, notes, or code fences):\n'
+        '    {"positive": x, "negative": y, "neutral": z}\n'
+        "- Each of x, y, and z should be a floating-point value between 0 and 1, representing the independent "
+        "intensity of the respective sentiment.\n"
+        "- Ensure that each sentiment dimension is scored independently and may sum to more or less than 1.\n\n"
+        "# Output Format\n\n"
+        "Return only a single-line JSON object in the format:\n"
+        '{"positive": [float between 0 and 1], "negative": [float between 0 and 1], "neutral": [float between 0 and 1]}\n\n'
+        "# Example\n\n"
+        'Input:\nText: "I love sunny days, but today has been a bit overwhelming."\n\n'
+        'Output:\n{"positive": 0.6, "negative": 0.4, "neutral": 0.3}\n\n'
+        "# Notes\n\n"
+        "- Do not include any explanation, commentary, or code formatting—only the JSON object as output.\n"
+        "- Each sentiment score should be evaluated independently for the input text.\n\n"
+        "Remember: Output only the JSON object as described, with all values in the [0, 1] range."
+    )
+
 # --- Utilities -----------------------------------------------------------------
 def _clip01(x: float) -> float:
     try:
@@ -111,7 +138,7 @@ class SentimentAnalyzer:
             if st.session_state.debug_mode:
                 st.code(f"SiEBERT raw response:\n{json.dumps(result, indent=2)}")
 
-            # HF output formats can vary: [[{label,score}]] or [{label,score}]
+            # HF output formats: [[{label,score}]] or [{label,score}]
             result_item = {}
             if isinstance(result, list) and result:
                 result_item = result[0][0] if isinstance(result[0], list) and result[0] else result[0]
@@ -134,7 +161,12 @@ class SentimentAnalyzer:
             return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
 
     def analyze_bart(self, text: str, api_key: str) -> Dict[str, float]:
-        """Analyze sentiment using BART (MNLI) via Hugging Face Inference API."""
+        """
+        Analyze sentiment using BART (MNLI) via Hugging Face Inference API.
+
+        We align output to the Playground JSON spec:
+        {"positive": x, "negative": y, "neutral": z} with each ∈ [0,1] independently.
+        """
         try:
             if not api_key:
                 st.error("Hugging Face API key required for BART")
@@ -149,7 +181,7 @@ class SentimentAnalyzer:
             response = requests.post(api_url, headers=headers, json=payload, timeout=60)
 
             if response.status_code == 503:
-                st.warning("BART model is loading on HF. Try again in a few seconds.")
+                st.warning("BART model is loading on HF. Try again shortly.")
                 return {"positive": 0.33, "negative": 0.33, "neutral": 0.34}
             response.raise_for_status()
 
@@ -161,8 +193,11 @@ class SentimentAnalyzer:
             blob = result[0] if isinstance(result, list) and result else result
             if isinstance(blob, dict) and "labels" in blob and "scores" in blob:
                 for label, score in zip(blob["labels"], blob["scores"]):
-                    scores_map[label] = _clip01(float(score))
-            return scores_map
+                    if label in scores_map:
+                        scores_map[label] = _clip01(float(score))
+
+            # Return in the exact JSON shape expected by your Playground prompt
+            return {"positive": scores_map["positive"], "negative": scores_map["negative"], "neutral": scores_map["neutral"]}
 
         except Exception as e:
             st.error(f"BART analysis failed: {e}")
@@ -170,9 +205,13 @@ class SentimentAnalyzer:
                 st.exception(e)
             return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
 
-    # ---------------- DeepSeek (OpenAI-compatible) ----------------
+    # ---------------- DeepSeek (OpenAI-compatible Chat Completions) ------------
     def analyze_deepseek(self, text: str, api_key: str) -> Dict[str, float]:
-        """Analyze sentiment using DeepSeek API (OpenAI-compatible)."""
+        """
+        Analyze sentiment using DeepSeek.
+        We reuse the exact Playground instruction as a **system** message,
+        and ask for JSON only. Output is parsed and clipped to [0,1].
+        """
         try:
             if not api_key:
                 st.error("DeepSeek API key required for DeepSeek")
@@ -180,24 +219,20 @@ class SentimentAnalyzer:
 
             client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
-            prompt = (
-                "Analyze the sentiment of the following text passage. "
-                'Return ONLY a JSON object: {"positive": 0.x, "negative": 0.y, "neutral": 0.z} '
-                "with each value in [0,1]. No prose.\n\n"
-                f"Text: {text[:1000]}"
-            )
+            instruction = playground_developer_instruction()
+            user_text = f'Text: {text[:1000]}'
 
             resp = client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[
-                    {"role": "system", "content": "You are a sentiment analysis assistant. Return only JSON."},
-                    {"role": "user", "content": prompt},
+                    {"role": "system", "content": instruction},
+                    {"role": "user", "content": user_text},
                 ],
                 temperature=0.0,
-                max_tokens=60,  # DeepSeek supports max_tokens
+                max_tokens=80,  # DeepSeek supports max_tokens
             )
 
-            result_text = resp.choices[0].message.content or "{}"
+            result_text = (resp.choices[0].message.content or "").strip()
             return _safe_json_loads(result_text)
 
         except Exception as e:
@@ -206,12 +241,11 @@ class SentimentAnalyzer:
                 st.exception(e)
             return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
 
-    # ---------------- OpenAI (GPT-5 nano via Chat Completions) ----------------
+    # ---------------- OpenAI (GPT-5 nano via Responses API) --------------------
     def analyze_gpt5nano(self, text: str, api_key: str) -> Dict[str, float]:
         """
-        Analyze sentiment using OpenAI GPT-5 nano via Chat Completions.
-        GPT-5 models require 'max_completion_tokens' (NOT 'max_tokens').
-        Uses JSON mode to guarantee valid JSON.
+        Analyze sentiment using OpenAI GPT-5 nano via **Responses** API,
+        matching your Playground configuration and prompt style.
         """
         try:
             if not api_key:
@@ -220,26 +254,46 @@ class SentimentAnalyzer:
 
             client = OpenAI(api_key=api_key)
 
-            user_prompt = (
-                "Analyze the sentiment of the following text. "
-                'Return ONLY a JSON object {"positive": x, "negative": y, "neutral": z} '
-                "with x,y,z in [0,1]. No explanation, no code fences.\n\n"
-                f"Text: {text[:1000]}"
-            )
+            instruction = playground_developer_instruction()
 
-            completion = client.chat.completions.create(
+            include_list = ["reasoning.encrypted_content"] if st.session_state.debug_mode else []
+
+            resp = client.responses.create(
                 model="gpt-5-nano",
-                response_format={"type": "json_object"},   # JSON mode
-                messages=[
-                    {"role": "system", "content": "You are a sentiment analysis assistant. Return only valid JSON."},
-                    {"role": "user", "content": user_prompt},
+                input=[
+                    {
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": instruction}],
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": f"Text: {text[:1000]}"}],
+                    },
                 ],
-                temperature=0.0,
-                max_completion_tokens=60,                  # ✅ correct param for GPT-5 on Chat API
+                text={"format": {"type": "text"}, "verbosity": "low"},  # mirror Playground; we still enforce JSON by instruction
+                reasoning={"effort": "low"},
+                tools=[],
+                store=False,
+                include=include_list,
+                max_output_tokens=80,  # ✅ Responses API uses max_output_tokens
             )
 
-            payload = completion.choices[0].message.content or "{}"
-            return _safe_json_loads(payload)
+            # Robust extraction for Responses API
+            out = ""
+            # Prefer output_text if present
+            if hasattr(resp, "output_text") and resp.output_text:
+                out = resp.output_text
+            else:
+                # Walk the structured "output" items (future-proof)
+                chunks: List[str] = []
+                for item in getattr(resp, "output", []) or []:
+                    if getattr(item, "type", "") == "message":
+                        for c in getattr(item, "content", []) or []:
+                            if getattr(c, "type", "") in ("output_text", "text"):
+                                chunks.append(getattr(c, "text", "") or "")
+                out = "".join(chunks)
+
+            return _safe_json_loads((out or "").strip())
 
         except Exception as e:
             st.error(f"GPT-5 nano analysis failed: {e}")
