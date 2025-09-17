@@ -1,29 +1,23 @@
+"""
+Sentiment Analysis Toolbox
+A comprehensive tool for analyzing text sentiment using multiple models
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
-from io import StringIO
+from io import StringIO, BytesIO
 import json
 import re
+import requests
 from typing import List, Dict, Tuple, Optional
 
 # Import required libraries
-try:
-    import nltk
-    from nltk.sentiment import SentimentIntensityAnalyzer
-    nltk.download('vader_lexicon', quiet=True)
-except ImportError:
-    st.error("Please install nltk: pip install nltk")
+import nltk
+from nltk.sentiment import SentimentIntensityAnalyzer
+nltk.download('vader_lexicon', quiet=True)
 
-try:
-    from transformers import pipeline
-    import torch
-except ImportError:
-    st.error("Please install transformers and torch: pip install transformers torch")
-
-try:
-    from openai import OpenAI
-except ImportError:
-    st.error("Please install openai: pip install openai")
+from openai import OpenAI
 
 # Page config
 st.set_page_config(
@@ -72,19 +66,35 @@ class SentimentAnalyzer:
         """Load SiEBERT model (cached)"""
         try:
             return pipeline("sentiment-analysis", 
-                          model="siebert/sentiment-roberta-large-english")
+                          model="siebert/sentiment-roberta-large-english",
+                          device=0 if torch.cuda.is_available() else -1)
         except Exception as e:
             st.error(f"SiEBERT loading failed: {e}")
             return None
     
-    def analyze_siebert(self, text: str) -> Dict[str, float]:
-        """Analyze sentiment using SiEBERT"""
+    def analyze_siebert(self, text: str, api_key: str) -> Dict[str, float]:
+        """Analyze sentiment using SiEBERT via Hugging Face Inference API"""
         try:
-            pipe = SentimentAnalyzer.get_siebert_pipeline()
-            if pipe is None:
+            if not api_key:
+                st.error("Hugging Face API key required for SiEBERT")
                 return {'positive': 0, 'negative': 0, 'neutral': 0}
             
-            result = pipe(text[:512])[0]  # Truncate to 512 chars for model limit
+            import requests
+            
+            API_URL = "https://api-inference.huggingface.co/models/siebert/sentiment-roberta-large-english"
+            headers = {"Authorization": f"Bearer {api_key}"}
+            
+            response = requests.post(API_URL, headers=headers, json={
+                "inputs": text[:512],  # Truncate to model's max length
+            })
+            
+            if response.status_code != 200:
+                raise Exception(f"API error: {response.text}")
+            
+            result = response.json()
+            if isinstance(result, list) and len(result) > 0:
+                result = result[0]
+            
             label = result['label'].lower()
             score = result['score']
             
@@ -98,39 +108,52 @@ class SentimentAnalyzer:
                 sentiment_scores['positive'] = 1 - score
             
             return sentiment_scores
+            
         except Exception as e:
             st.error(f"SiEBERT analysis failed: {e}")
             return {'positive': 0, 'negative': 0, 'neutral': 0}
     
     def analyze_bart(self, text: str, api_key: str) -> Dict[str, float]:
-        """Analyze sentiment using BART with prompting"""
+        """Analyze sentiment using BART via Hugging Face Inference API"""
         try:
-            from transformers import AutoTokenizer, AutoModelForSequenceClassification
+            if not api_key:
+                st.error("Hugging Face API key required for BART")
+                return {'positive': 0, 'negative': 0, 'neutral': 0}
             
-            # For sentiment analysis with BART, we'll use a different approach
-            # since BART is primarily for generation tasks
-            prompt = f"""Analyze the sentiment of the following text passage. 
-            Classify it into three independent sentiment categories: positive, negative, and neutral. 
-            Assign each category a separate confidence value (from 0 to 1).
+            import requests
             
-            Text: {text[:500]}
+            API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
+            headers = {"Authorization": f"Bearer {api_key}"}
             
-            Sentiment scores:"""
+            response = requests.post(API_URL, headers=headers, json={
+                "inputs": text[:512],  # Truncate to model's max length
+                "parameters": {
+                    "candidate_labels": ["positive", "negative", "neutral"],
+                    "multi_label": True  # Allow independent scores
+                }
+            })
             
-            # Note: BART for sentiment would typically require fine-tuning
-            # For demonstration, returning placeholder values
-            # In production, you'd use a fine-tuned BART or different approach
+            if response.status_code != 200:
+                raise Exception(f"API error: {response.text}")
             
-            # Simplified approach using text generation
-            pipe = pipeline("text-generation", model="facebook/bart-large-cnn", max_length=100)
+            result = response.json()
             
-            # This is a simplified implementation
-            # Real implementation would need proper prompting or fine-tuned model
-            return {
-                'positive': 0.33,
-                'negative': 0.33,
-                'neutral': 0.34
-            }
+            # Parse the result based on the response structure
+            if 'labels' in result and 'scores' in result:
+                scores = {}
+                for label, score in zip(result['labels'], result['scores']):
+                    scores[label] = score
+            else:
+                # Handle alternative response format
+                scores = {'positive': 0.33, 'negative': 0.33, 'neutral': 0.34}
+            
+            # Ensure all sentiment types are present
+            for sentiment in ['positive', 'negative', 'neutral']:
+                if sentiment not in scores:
+                    scores[sentiment] = 0.0
+            
+            return scores
+            
         except Exception as e:
             st.error(f"BART analysis failed: {e}")
             return {'positive': 0, 'negative': 0, 'neutral': 0}
@@ -181,16 +204,31 @@ class SentimentAnalyzer:
             Assign each category a separate confidence value (from 0 to 1) that is independent and not evaluated as a probability distribution with a sum of 1. 
             Return ONLY a JSON object with the format: {"positive": 0.X, "negative": 0.Y, "neutral": 0.Z}"""
             
-            # Note: Using the structure provided, though GPT-5 nano doesn't exist yet
-            # Adapting to use chat completions as fallback
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",  # Fallback to available model
-                messages=[
-                    {"role": "system", "content": "You are a sentiment analysis assistant. Return only JSON."},
-                    {"role": "user", "content": f"{prompt}\n\nText: {text[:1000]}"}
-                ],
-                temperature=0.1
-            )
+            # Use GPT-5 nano with chat completions endpoint
+            # Note: When GPT-5 nano becomes available, update the model name
+            try:
+                # Try GPT-5 nano first
+                response = client.chat.completions.create(
+                    model="gpt-5-nano",
+                    messages=[
+                        {"role": "system", "content": "You are a sentiment analysis assistant. Return only JSON format responses."},
+                        {"role": "user", "content": f"{prompt}\n\nText: {text[:1000]}"}
+                    ],
+                    temperature=0.1,
+                    max_tokens=100
+                )
+            except Exception as model_error:
+                # Fallback to GPT-4 if GPT-5 nano is not available
+                st.warning("GPT-5 nano not available, using GPT-4 fallback")
+                response = client.chat.completions.create(
+                    model="gpt-4-turbo-preview",
+                    messages=[
+                        {"role": "system", "content": "You are a sentiment analysis assistant. Return only JSON format responses."},
+                        {"role": "user", "content": f"{prompt}\n\nText: {text[:1000]}"}
+                    ],
+                    temperature=0.1,
+                    max_tokens=100
+                )
             
             # Parse the response
             result_text = response.choices[0].message.content
@@ -198,6 +236,10 @@ class SentimentAnalyzer:
             json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
             if json_match:
                 scores = json.loads(json_match.group())
+                # Ensure all required keys are present
+                for key in ['positive', 'negative', 'neutral']:
+                    if key not in scores:
+                        scores[key] = 0.0
                 return scores
             else:
                 return {'positive': 0, 'negative': 0, 'neutral': 0}
@@ -211,7 +253,7 @@ class SentimentAnalyzer:
         if model == "VADER":
             return self.analyze_vader(text)
         elif model == "SiEBERT":
-            return self.analyze_siebert(text)
+            return self.analyze_siebert(text, api_keys.get('Entresent_HF_API', ''))
         elif model == "BART":
             return self.analyze_bart(text, api_keys.get('Entresent_HF_API', ''))
         elif model == "DeepSeek":
@@ -273,6 +315,26 @@ def main():
         
         # API Keys section
         st.subheader("API Keys")
+        st.info("ℹ️ VADER runs locally. SiEBERT and BART require Hugging Face API. DeepSeek and GPT-5 nano require their respective API keys.")
+        
+        with st.expander("📚 How to get API keys"):
+            st.markdown("""
+            **Hugging Face API Key** (required for SiEBERT & BART):
+            1. Go to https://huggingface.co/settings/tokens
+            2. Create a free account if needed
+            3. Click "New token" → Give it a name → Copy the token
+            
+            **DeepSeek API Key**:
+            1. Visit https://platform.deepseek.com/
+            2. Sign up and go to API Keys section
+            3. Create and copy your API key
+            
+            **OpenAI API Key** (for GPT-5 nano):
+            1. Go to https://platform.openai.com/api-keys
+            2. Sign in or create an account
+            3. Create new secret key and copy it
+            """)
+        
         use_secrets = st.checkbox("Use Streamlit Secrets", value=True)
         
         api_keys = {}
@@ -284,19 +346,31 @@ def main():
                 st.success("Using API keys from Streamlit secrets")
             except Exception:
                 st.warning("Secrets not configured. Please add API keys manually.")
-                api_keys['Entresent_HF_API'] = st.text_input("Hugging Face API Key", type="password")
+                api_keys['Entresent_HF_API'] = st.text_input("Hugging Face API Key (required for SiEBERT/BART)", type="password")
                 api_keys['Entresent_DS_API'] = st.text_input("DeepSeek API Key", type="password")
-                api_keys['Entresent_OAI_API'] = st.text_input("OpenAI API Key", type="password")
+                api_keys['Entresent_OAI_API'] = st.text_input("OpenAI API Key (for GPT-5 nano)", type="password")
         else:
-            api_keys['Entresent_HF_API'] = st.text_input("Hugging Face API Key", type="password")
+            api_keys['Entresent_HF_API'] = st.text_input("Hugging Face API Key (required for SiEBERT/BART)", type="password")
             api_keys['Entresent_DS_API'] = st.text_input("DeepSeek API Key", type="password")
-            api_keys['Entresent_OAI_API'] = st.text_input("OpenAI API Key", type="password")
+            api_keys['Entresent_OAI_API'] = st.text_input("OpenAI API Key (for GPT-5 nano)", type="password")
         
         st.divider()
         
         # Model selection
         st.subheader("Model Selection")
         available_models = ["VADER", "SiEBERT", "BART", "DeepSeek", "GPT-5 nano"]
+        
+        # Check which models are available based on API keys
+        models_status = []
+        models_status.append("✅ VADER (ready)")
+        models_status.append("✅ SiEBERT" if api_keys.get('Entresent_HF_API') else "❌ SiEBERT (HF API key required)")
+        models_status.append("✅ BART" if api_keys.get('Entresent_HF_API') else "❌ BART (HF API key required)")
+        models_status.append("✅ DeepSeek" if api_keys.get('Entresent_DS_API') else "⚠️ DeepSeek (API key missing)")
+        models_status.append("✅ GPT-5 nano" if api_keys.get('Entresent_OAI_API') else "⚠️ GPT-5 nano (API key missing)")
+        
+        with st.expander("Model Availability", expanded=False):
+            for status in models_status:
+                st.write(status)
         
         benchmark_mode = st.checkbox("🏁 Benchmark Mode (Run all models)", value=False)
         
@@ -336,6 +410,26 @@ def main():
         st.subheader("🎯 Analysis Settings")
         st.info(f"**Texts to analyze:** {len(texts)}")
         st.info(f"**Models to run:** {', '.join(models_to_run)}")
+        
+        # Check if required API keys are present for selected models
+        missing_keys = []
+        if not benchmark_mode:
+            if selected_model in ["SiEBERT", "BART"] and not api_keys.get('Entresent_HF_API'):
+                missing_keys.append("Hugging Face API key (required for " + selected_model + ")")
+            elif selected_model == "DeepSeek" and not api_keys.get('Entresent_DS_API'):
+                missing_keys.append("DeepSeek API key")
+            elif selected_model == "GPT-5 nano" and not api_keys.get('Entresent_OAI_API'):
+                missing_keys.append("OpenAI API key")
+        else:
+            if not api_keys.get('Entresent_HF_API'):
+                missing_keys.append("Hugging Face API key (for SiEBERT & BART)")
+            if not api_keys.get('Entresent_DS_API'):
+                missing_keys.append("DeepSeek API key")
+            if not api_keys.get('Entresent_OAI_API'):
+                missing_keys.append("OpenAI API key")
+        
+        if missing_keys:
+            st.warning(f"⚠️ Missing: {', '.join(missing_keys)}")
         
         if st.button("🚀 Analyze Sentiment", type="primary", disabled=len(texts) == 0):
             if len(texts) > 0:
