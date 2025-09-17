@@ -240,44 +240,45 @@ class SentimentAnalyzer:
             st.error(f"DeepSeek analysis failed: {e}")
             return {'positive': 0, 'negative': 0, 'neutral': 0}
     
-    def analyze_gpt5nano(self, text: str, api_key: str) -> Dict[str, float]:
-        """Analyze sentiment using GPT-5 nano API"""
-        try:
-            client = OpenAI(api_key=api_key)
-            
-            prompt = """Analyze the sentiment of the following text passage. 
-            Classify it into three independent sentiment categories: positive, negative, and neutral. 
-            Assign each category a separate confidence value (from 0 to 1) that is independent and not evaluated as a probability distribution with a sum of 1. 
-            Return ONLY a JSON object with the format: {"positive": 0.X, "negative": 0.Y, "neutral": 0.Z}"""
-            
-            # Use GPT-5 nano with correct model name
-            response = client.chat.completions.create(
-                model="openai/gpt-5-nano-2025-08-07",
-                messages=[
-                    {"role": "system", "content": "You are a sentiment analysis assistant. Return only JSON format responses."},
-                    {"role": "user", "content": f"{prompt}\n\nText: {text[:1000]}"}
-                ],
-                temperature=0.1,
-                max_tokens=100
-            )
-            
-            # Parse the response
-            result_text = response.choices[0].message.content
-            # Extract JSON from response
-            json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
-            if json_match:
-                scores = json.loads(json_match.group())
-                # Ensure all required keys are present
-                for key in ['positive', 'negative', 'neutral']:
-                    if key not in scores:
-                        scores[key] = 0.0
-                return scores
-            else:
-                return {'positive': 0, 'negative': 0, 'neutral': 0}
-                
-        except Exception as e:
-            st.error(f"GPT-5 nano analysis failed: {e}")
-            return {'positive': 0, 'negative': 0, 'neutral': 0}
+    def analyze_gpt5nano_responses(self, text: str, api_key: str) -> Dict[str, float]:
+    if not api_key:
+        st.error("OpenAI API key required for GPT-5 nano")
+        return {'positive': 0, 'negative': 0, 'neutral': 0}
+
+    client = OpenAI(api_key=api_key)
+
+    resp = client.responses.create(
+        model="gpt-5-nano",
+        input=[
+            {"role": "system", "content": "You are a sentiment analysis assistant. Return only valid JSON."},
+            {"role": "user", "content":
+                ("Analyze the sentiment of the following text. "
+                 'Return ONLY {"positive": x, "negative": y, "neutral": z} with x,y,z ∈ [0,1]. '
+                 f"\n\nText: {text[:1000]}")
+            },
+        ],
+        response_format={"type": "json_object"},
+    )
+
+    # Extract plain text from the response in a version-agnostic way
+    text_chunks = []
+    for item in getattr(resp, "output", []):
+        if getattr(item, "type", "") == "message":
+            for c in getattr(item, "content", []):
+                if getattr(c, "type", "") in ("output_text", "text"):
+                    text_chunks.append(getattr(c, "text", ""))
+    result_text = "".join(text_chunks) or getattr(resp, "output_text", "")
+
+    try:
+        scores = json.loads(result_text)
+        return {
+            'positive': float(scores.get('positive', 0.0)),
+            'negative': float(scores.get('negative', 0.0)),
+            'neutral':  float(scores.get('neutral',  0.0)),
+        }
+    except Exception as e:
+        st.error(f"GPT-5 nano parse error: {e}")
+        return {'positive': 0, 'negative': 0, 'neutral': 0}
     
     def analyze_text(self, text: str, model: str, api_keys: Dict[str, str]) -> Dict[str, float]:
         """Main method to analyze text with specified model"""
