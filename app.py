@@ -105,7 +105,6 @@ def _responses_text(resp) -> str:
             return "".join(chunks)
     except Exception:
         pass
-    # Last-ditch: stringify (debug only)
     return ""
 
 
@@ -279,19 +278,16 @@ class SentimentAnalyzer:
             client = OpenAI(api_key=api_key)
             instruction = playground_developer_instruction()
 
-            # Enforce structured output with a JSON schema
-            schema = {
-                "name": "SentimentScores",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "positive": {"type": "number", "minimum": 0, "maximum": 1},
-                        "negative": {"type": "number", "minimum": 0, "maximum": 1},
-                        "neutral":  {"type": "number", "minimum": 0, "maximum": 1},
-                    },
-                    "required": ["positive", "negative", "neutral"],
-                    "additionalProperties": False,
+            # Enforce structured output with a JSON schema (correct placement!)
+            schema_obj = {
+                "type": "object",
+                "properties": {
+                    "positive": {"type": "number", "minimum": 0, "maximum": 1},
+                    "negative": {"type": "number", "minimum": 0, "maximum": 1},
+                    "neutral":  {"type": "number", "minimum": 0, "maximum": 1},
                 },
+                "required": ["positive", "negative", "neutral"],
+                "additionalProperties": False,
             }
 
             include_list = ["reasoning.encrypted_content"] if st.session_state.debug_mode else []
@@ -302,7 +298,14 @@ class SentimentAnalyzer:
                     {"role": "developer", "content": [{"type": "input_text", "text": instruction}]},
                     {"role": "user", "content": [{"type": "input_text", "text": f"Text: {text[:1000]}"}]},
                 ],
-                text={"format": {"type": "json_schema", "json_schema": schema}, "verbosity": "low"},
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "SentimentScores",   # ✅ REQUIRED at text.format.name
+                        "schema": schema_obj,        # ✅ REQUIRED at text.format.schema
+                    },
+                    "verbosity": "low",
+                },
                 reasoning={"effort": "low"},
                 tools=[],
                 store=False,
@@ -310,6 +313,9 @@ class SentimentAnalyzer:
                 max_output_tokens=120,
                 temperature=0.0,
             )
+
+            if st.session_state.debug_mode:
+                st.code(resp.model_dump_json(indent=2) if hasattr(resp, "model_dump_json") else str(resp))
 
             out = _responses_text(resp).strip()
             if st.session_state.debug_mode:
