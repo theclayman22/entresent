@@ -259,7 +259,7 @@ class SentimentAnalyzer:
             include_list = ["reasoning.encrypted_content"] if st.session_state.debug_mode else []
 
             resp = client.responses.create(
-                model="openai/gpt-5-nano",
+                model="gpt-5-nano",
                 input=[
                     {
                         "role": "developer",
