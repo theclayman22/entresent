@@ -40,11 +40,13 @@ def _clip01(x: float) -> float:
 
 
 def _safe_json_loads(s: str) -> Dict[str, float]:
-    """Parse JSON object safely, returning a dict with positive/negative/neutral ∈ [0,1]."""
+    """
+    Parse JSON object safely, returning a dict with positive/negative/neutral ∈ [0,1].
+    Accepts either a pure JSON string or a string containing a JSON block.
+    """
     try:
         data = json.loads(s)
     except Exception:
-        # Last resort: try to extract the first {} block
         m = re.search(r"\{.*\}", s, flags=re.DOTALL)
         data = json.loads(m.group(0)) if m else {}
     return {
@@ -117,15 +119,12 @@ class SentimentAnalyzer:
                 result_item = result
 
             label = str(result_item.get("label", "")).lower()
-            score = float(result_item.get("score", 0.5))
-            score = _clip01(score)
+            score = _clip01(float(result_item.get("score", 0.5)))
 
             if "positive" in label:
                 return {"positive": score, "negative": _clip01(1 - score), "neutral": 0.0}
             if "negative" in label:
                 return {"negative": score, "positive": _clip01(1 - score), "neutral": 0.0}
-
-            # Fallback (unknown label)
             return {"positive": 0.33, "negative": 0.33, "neutral": 0.34}
 
         except Exception as e:
@@ -159,13 +158,10 @@ class SentimentAnalyzer:
                 st.code(f"BART raw response:\n{json.dumps(result, indent=2)}")
 
             scores_map: Dict[str, float] = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
-
-            # Either {"labels":[...],"scores":[...]} or [{"labels":[...],"scores":[...]}]
             blob = result[0] if isinstance(result, list) and result else result
             if isinstance(blob, dict) and "labels" in blob and "scores" in blob:
                 for label, score in zip(blob["labels"], blob["scores"]):
                     scores_map[label] = _clip01(float(score))
-
             return scores_map
 
         except Exception as e:
@@ -198,7 +194,7 @@ class SentimentAnalyzer:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.0,
-                max_tokens=60,
+                max_tokens=60,  # DeepSeek supports max_tokens
             )
 
             result_text = resp.choices[0].message.content or "{}"
@@ -210,11 +206,12 @@ class SentimentAnalyzer:
                 st.exception(e)
             return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
 
-    # ---------------- OpenAI (GPT-5 nano) ----------------
+    # ---------------- OpenAI (GPT-5 nano via Chat Completions) ----------------
     def analyze_gpt5nano(self, text: str, api_key: str) -> Dict[str, float]:
         """
         Analyze sentiment using OpenAI GPT-5 nano via Chat Completions.
-        Uses response_format=json_object to guarantee valid JSON.
+        GPT-5 models require 'max_completion_tokens' (NOT 'max_tokens').
+        Uses JSON mode to guarantee valid JSON.
         """
         try:
             if not api_key:
@@ -231,14 +228,14 @@ class SentimentAnalyzer:
             )
 
             completion = client.chat.completions.create(
-                model="gpt-5-nano",  # ✅ correct model ID
-                response_format={"type": "json_object"},
+                model="gpt-5-nano",
+                response_format={"type": "json_object"},   # JSON mode
                 messages=[
                     {"role": "system", "content": "You are a sentiment analysis assistant. Return only valid JSON."},
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.0,
-                max_tokens=60,
+                max_completion_tokens=60,                  # ✅ correct param for GPT-5 on Chat API
             )
 
             payload = completion.choices[0].message.content or "{}"
@@ -528,7 +525,12 @@ def main() -> None:
                 avg_neg = float(np.mean([s.get("negative", 0.0) for s in scores])) if scores else 0.0
                 avg_neu = float(np.mean([s.get("neutral", 0.0) for s in scores])) if scores else 0.0
                 summary_rows.append(
-                    {"Model": model, "Avg Positive": round(avg_pos, 3), "Avg Negative": round(avg_neg, 3), "Avg Neutral": round(avg_neu, 3)}
+                    {
+                        "Model": model,
+                        "Avg Positive": round(avg_pos, 3),
+                        "Avg Negative": round(avg_neg, 3),
+                        "Avg Neutral": round(avg_neu, 3),
+                    }
                 )
             df_summary = pd.DataFrame(summary_rows)
             st.dataframe(df_summary, use_container_width=True)
