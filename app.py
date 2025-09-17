@@ -79,8 +79,6 @@ class SentimentAnalyzer:
                 st.error("Hugging Face API key required for SiEBERT")
                 return {'positive': 0, 'negative': 0, 'neutral': 0}
             
-            import requests
-            
             API_URL = "https://api-inference.huggingface.co/models/siebert/sentiment-roberta-large-english"
             headers = {"Authorization": f"Bearer {api_key}"}
             
@@ -88,29 +86,61 @@ class SentimentAnalyzer:
                 "inputs": text[:512],  # Truncate to model's max length
             })
             
-            if response.status_code != 200:
+            if response.status_code == 503:
+                st.warning("SiEBERT model is loading. Please wait a moment and try again.")
+                return {'positive': 0.5, 'negative': 0.5, 'neutral': 0.0}
+            elif response.status_code != 200:
                 raise Exception(f"API error: {response.text}")
             
             result = response.json()
-            if isinstance(result, list) and len(result) > 0:
-                result = result[0]
             
-            label = result['label'].lower()
-            score = result['score']
+            # Debug output if enabled
+            if st.session_state.get('debug_mode', False):
+                st.code(f"SiEBERT raw response: {json.dumps(result, indent=2)}")
+            
+            # Handle different response formats
+            # The response is typically a list with nested lists
+            if isinstance(result, list):
+                if len(result) > 0:
+                    if isinstance(result[0], list):
+                        # Response format: [[{"label": "POSITIVE", "score": 0.99}]]
+                        result_item = result[0][0] if len(result[0]) > 0 else {}
+                    else:
+                        # Response format: [{"label": "POSITIVE", "score": 0.99}]
+                        result_item = result[0]
+                else:
+                    result_item = {}
+            elif isinstance(result, dict):
+                result_item = result
+            else:
+                result_item = {}
+            
+            # Extract label and score
+            label = result_item.get('label', '').lower()
+            score = result_item.get('score', 0.5)
             
             # Convert to our standard format
             sentiment_scores = {'positive': 0, 'negative': 0, 'neutral': 0}
-            if label == 'positive':
+            if 'positive' in label:
                 sentiment_scores['positive'] = score
                 sentiment_scores['negative'] = 1 - score
-            else:
+                sentiment_scores['neutral'] = 0.0
+            elif 'negative' in label:
                 sentiment_scores['negative'] = score
                 sentiment_scores['positive'] = 1 - score
+                sentiment_scores['neutral'] = 0.0
+            else:
+                # If label is not recognized, distribute equally
+                sentiment_scores['positive'] = 0.33
+                sentiment_scores['negative'] = 0.33
+                sentiment_scores['neutral'] = 0.34
             
             return sentiment_scores
             
         except Exception as e:
             st.error(f"SiEBERT analysis failed: {e}")
+            if st.session_state.get('debug_mode', False):
+                st.exception(e)
             return {'positive': 0, 'negative': 0, 'neutral': 0}
     
     def analyze_bart(self, text: str, api_key: str) -> Dict[str, float]:
@@ -119,8 +149,6 @@ class SentimentAnalyzer:
             if not api_key:
                 st.error("Hugging Face API key required for BART")
                 return {'positive': 0, 'negative': 0, 'neutral': 0}
-            
-            import requests
             
             API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
             headers = {"Authorization": f"Bearer {api_key}"}
@@ -133,18 +161,34 @@ class SentimentAnalyzer:
                 }
             })
             
-            if response.status_code != 200:
+            if response.status_code == 503:
+                st.warning("BART model is loading. Please wait a moment and try again.")
+                return {'positive': 0.33, 'negative': 0.33, 'neutral': 0.34}
+            elif response.status_code != 200:
                 raise Exception(f"API error: {response.text}")
             
             result = response.json()
             
+            # Debug output if enabled
+            if st.session_state.get('debug_mode', False):
+                st.code(f"BART raw response: {json.dumps(result, indent=2)}")
+            
             # Parse the result based on the response structure
-            if 'labels' in result and 'scores' in result:
+            if isinstance(result, dict) and 'labels' in result and 'scores' in result:
                 scores = {}
                 for label, score in zip(result['labels'], result['scores']):
                     scores[label] = score
+            elif isinstance(result, list) and len(result) > 0:
+                # Handle alternative list format
+                first_result = result[0]
+                if isinstance(first_result, dict) and 'labels' in first_result and 'scores' in first_result:
+                    scores = {}
+                    for label, score in zip(first_result['labels'], first_result['scores']):
+                        scores[label] = score
+                else:
+                    scores = {'positive': 0.33, 'negative': 0.33, 'neutral': 0.34}
             else:
-                # Handle alternative response format
+                # Default scores if format is unexpected
                 scores = {'positive': 0.33, 'negative': 0.33, 'neutral': 0.34}
             
             # Ensure all sentiment types are present
@@ -156,6 +200,8 @@ class SentimentAnalyzer:
             
         except Exception as e:
             st.error(f"BART analysis failed: {e}")
+            if st.session_state.get('debug_mode', False):
+                st.exception(e)
             return {'positive': 0, 'negative': 0, 'neutral': 0}
     
     def analyze_deepseek(self, text: str, api_key: str) -> Dict[str, float]:
@@ -204,31 +250,16 @@ class SentimentAnalyzer:
             Assign each category a separate confidence value (from 0 to 1) that is independent and not evaluated as a probability distribution with a sum of 1. 
             Return ONLY a JSON object with the format: {"positive": 0.X, "negative": 0.Y, "neutral": 0.Z}"""
             
-            # Use GPT-5 nano with chat completions endpoint
-            # Note: When GPT-5 nano becomes available, update the model name
-            try:
-                # Try GPT-5 nano first
-                response = client.chat.completions.create(
-                    model="gpt-5-nano",
-                    messages=[
-                        {"role": "system", "content": "You are a sentiment analysis assistant. Return only JSON format responses."},
-                        {"role": "user", "content": f"{prompt}\n\nText: {text[:1000]}"}
-                    ],
-                    temperature=0.1,
-                    max_tokens=100
-                )
-            except Exception as model_error:
-                # Fallback to GPT-4 if GPT-5 nano is not available
-                st.warning("GPT-5 nano not available, using GPT-4 fallback")
-                response = client.chat.completions.create(
-                    model="gpt-4-turbo-preview",
-                    messages=[
-                        {"role": "system", "content": "You are a sentiment analysis assistant. Return only JSON format responses."},
-                        {"role": "user", "content": f"{prompt}\n\nText: {text[:1000]}"}
-                    ],
-                    temperature=0.1,
-                    max_tokens=100
-                )
+            # Use GPT-5 nano with correct model name
+            response = client.chat.completions.create(
+                model="openai/gpt-5-nano-2025-08-07",
+                messages=[
+                    {"role": "system", "content": "You are a sentiment analysis assistant. Return only JSON format responses."},
+                    {"role": "user", "content": f"{prompt}\n\nText: {text[:1000]}"}
+                ],
+                temperature=0.1,
+                max_tokens=100
+            )
             
             # Parse the response
             result_text = response.choices[0].message.content
@@ -373,6 +404,11 @@ def main():
                 st.write(status)
         
         benchmark_mode = st.checkbox("🏁 Benchmark Mode (Run all models)", value=False)
+        
+        # Debug mode toggle (optional)
+        with st.expander("🔧 Advanced Settings", expanded=False):
+            debug_mode = st.checkbox("Enable Debug Mode", value=False, help="Show detailed API responses for troubleshooting")
+            st.session_state.debug_mode = debug_mode
         
         if not benchmark_mode:
             selected_model = st.selectbox("Select Model", available_models)
