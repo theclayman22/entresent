@@ -560,18 +560,32 @@ def load_texts_from_file(uploaded_file) -> List[str]:
         st.error(f"Error loading file: {e}")
         return []
 
-def create_results_dataframe(texts: List[str], results: Dict, truncate: bool = True) -> pd.DataFrame:
-    """Create a formatted DataFrame from analysis results."""
-    df_data: List[Dict[str, float]] = []
+def create_results_dataframe(texts: List[str], results: Dict, truncate: bool = True, include_explanations: bool = False) -> pd.DataFrame:
+    """Create a formatted DataFrame from analysis results including explanations if available."""
+    df_data: List[Dict] = []
 
     for i, text in enumerate(texts):
         display_text = text[:100] + "..." if (truncate and len(text) > 100) else text
-        row: Dict[str, float] = {"Text": display_text}
+        row: Dict = {"Text": display_text}
+        
+        # Add scores
         for model, scores_list in results.items():
             if i < len(scores_list):
                 for sentiment, value in scores_list[i].items():
                     if sentiment != "compound":  # Skip compound for cleaner display
                         row[f"{model}_{sentiment}"] = round(float(value), 3)
+        
+        # Add explanations if available
+        if include_explanations and st.session_state.explanations:
+            for model_name in ["DeepSeek", "GPT-5 nano", "GPT-4o (fallback)"]:
+                if model_name in st.session_state.explanations:
+                    if i in st.session_state.explanations[model_name]:
+                        explanation = st.session_state.explanations[model_name][i]
+                        # Truncate long explanations for table display
+                        if len(explanation) > 150:
+                            explanation = explanation[:147] + "..."
+                        row[f"{model_name} Explanation"] = explanation
+        
         df_data.append(row)
 
     return pd.DataFrame(df_data)
@@ -723,11 +737,11 @@ def main() -> None:
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Analysis Mode", analysis_mode)
+        st.markdown(f"**Analysis Mode:** {analysis_mode}")
     with col2:
-        st.metric("Texts to Analyze", len(texts))
+        st.markdown(f"**Texts to Analyze:** {len(texts)}")
     with col3:
-        st.metric("Models to Run", len(models_to_run))
+        st.markdown(f"**Models to Run:** {len(models_to_run)}")
     
     # Check for missing keys
     missing_keys = []
@@ -749,64 +763,57 @@ def main() -> None:
     if missing_keys:
         st.warning(f"⚠️ Missing: {', '.join(missing_keys)}")
     
-    # Clear explanations when starting new analysis
-    if st.button("🚀 **ANALYZE**", type="primary", disabled=len(texts) == 0, use_container_width=True):
-        st.session_state.explanations = {}
+    # Single centered analyze button
+    st.markdown("<br>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([2, 1, 2])
+    with col2:
+        analyze_button = st.button(
+            "**🚀 ANALYZE**", 
+            type="primary", 
+            disabled=len(texts) == 0,
+            use_container_width=True
+        )
     
     # ---------------- Execution ----------------
-    if st.button("", key="dummy_button", disabled=True):  # Hidden button for logic
-        pass
-    
-    if len(texts) > 0 and st.session_state.get('run_analysis', False):
-        st.session_state['run_analysis'] = False  # Reset flag
-    
-    # Check if button was pressed
-    if 'dummy_button' not in st.session_state:
-        st.session_state['dummy_button'] = False
-    
-    # The actual analysis trigger
-    col1, col2, col3 = st.columns([1, 3, 1])
-    with col2:
-        if st.button("🚀 **ANALYZE SENTIMENT**", type="primary", disabled=len(texts) == 0, key="analyze_btn", use_container_width=True):
-            if texts:
-                st.session_state.explanations = {}  # Clear previous explanations
-                analyzer = SentimentAnalyzer()
-                results: Dict[str, List[Dict[str, float]]] = {}
-                
-                total_ops = max(1, len(models_to_run) * len(texts))
-                progress = st.progress(0)
-                status = st.empty()
-                op = 0
-                
-                mode = analysis_mode.lower().replace(" ", "_")
-                if mode == "ekman_emotions":
-                    mode = "ekman"
-                
-                for model in models_to_run:
-                    status.text(f"Running {model}...")
-                    model_results: List[Dict[str, float]] = []
-                    for idx, t in enumerate(texts):
-                        try:
-                            scores = analyzer.analyze_text(t, model, api_keys, mode, idx)
-                        except Exception as e:
-                            st.error(f"{model} failed on text {idx+1}: {e}")
-                            if st.session_state.debug_mode:
-                                st.exception(e)
-                            if mode == "valence":
-                                scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
-                            else:
-                                scores = {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
-                                        "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
-                        model_results.append(scores)
-                        op += 1
-                        progress.progress(op / total_ops)
-                    results[model] = model_results
-                
-                progress.empty()
-                status.empty()
-                st.session_state.results = (texts, results, analysis_mode)
-                st.success("✅ Analysis complete!")
-                st.rerun()
+    if analyze_button and texts:
+        st.session_state.explanations = {}  # Clear previous explanations
+        analyzer = SentimentAnalyzer()
+        results: Dict[str, List[Dict[str, float]]] = {}
+        
+        total_ops = max(1, len(models_to_run) * len(texts))
+        progress = st.progress(0)
+        status = st.empty()
+        op = 0
+        
+        mode = analysis_mode.lower().replace(" ", "_")
+        if mode == "ekman_emotions":
+            mode = "ekman"
+        
+        for model in models_to_run:
+            status.text(f"Running {model}...")
+            model_results: List[Dict[str, float]] = []
+            for idx, t in enumerate(texts):
+                try:
+                    scores = analyzer.analyze_text(t, model, api_keys, mode, idx)
+                except Exception as e:
+                    st.error(f"{model} failed on text {idx+1}: {e}")
+                    if st.session_state.debug_mode:
+                        st.exception(e)
+                    if mode == "valence":
+                        scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
+                    else:
+                        scores = {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
+                                "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
+                model_results.append(scores)
+                op += 1
+                progress.progress(op / total_ops)
+            results[model] = model_results
+        
+        progress.empty()
+        status.empty()
+        st.session_state.results = (texts, results, analysis_mode)
+        st.success("✅ Analysis complete!")
+        st.rerun()
 
     # ---------------- Results ----------------
     if st.session_state.results:
@@ -815,39 +822,25 @@ def main() -> None:
         st.subheader(f"📊 Results - {result_mode}")
 
         # Options row
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         with col1:
             show_full_text = st.checkbox("Show full text", value=False)
         with col2:
             highlight_max = st.checkbox("Highlight max values", value=True)
         with col3:
-            show_explanations = st.checkbox("Show explanations", value=st.session_state.explain_mode != "None")
-        with col4:
             download_format = st.selectbox("Download format", ["CSV", "Excel"])
 
-        # Results DataFrame
-        df_results = create_results_dataframe(texts, results, truncate=not show_full_text)
+        # Results DataFrame with explanations
+        include_explanations = st.session_state.explain_mode != "None" and bool(st.session_state.explanations)
+        df_results = create_results_dataframe(texts, results, truncate=not show_full_text, include_explanations=include_explanations)
 
         if highlight_max:
-            score_cols = [c for c in df_results.columns if c != "Text"]
+            # Only highlight numeric columns (not explanation columns)
+            score_cols = [c for c in df_results.columns if c != "Text" and "Explanation" not in c]
             styled = df_results.style.highlight_max(subset=score_cols, color="lightgreen", axis=1)
             st.dataframe(styled, width="stretch")
         else:
             st.dataframe(df_results, width="stretch")
-
-        # Show explanations if available
-        if show_explanations and st.session_state.explanations:
-            st.divider()
-            st.subheader("💡 AI Explanations")
-            
-            for model_name, model_explanations in st.session_state.explanations.items():
-                if model_explanations:
-                    with st.expander(f"{model_name} Explanations", expanded=True):
-                        for text_idx, explanation in model_explanations.items():
-                            text_preview = texts[text_idx][:100] + "..." if len(texts[text_idx]) > 100 else texts[text_idx]
-                            st.markdown(f"**Text {text_idx + 1}:** {text_preview}")
-                            st.markdown(f"*{explanation}*")
-                            st.divider()
 
         # Downloads
         if download_format == "CSV":
