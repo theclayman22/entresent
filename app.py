@@ -1,5 +1,5 @@
 """
-Sentiment Analysis Toolbox
+Sentiment Analysis Toolbox - Entresent
 A comprehensive tool for analyzing text sentiment using multiple models.
 Supports both valence analysis and Ekman emotions.
 Run with:  streamlit run app.py
@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from io import BytesIO
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -24,13 +24,17 @@ import nltk
 nltk.download("vader_lexicon", quiet=True)
 
 # --- Streamlit page config -----------------------------------------------------
-st.set_page_config(page_title="Sentiment Analysis Toolbox", page_icon="🎭", layout="wide")
+st.set_page_config(page_title="Entresent - Sentiment Analysis", page_icon="🎭", layout="wide")
 
 # --- Session state -------------------------------------------------------------
 if "results" not in st.session_state:
     st.session_state.results = None
 if "debug_mode" not in st.session_state:
     st.session_state.debug_mode = False
+if "explain_mode" not in st.session_state:
+    st.session_state.explain_mode = "None"
+if "explanations" not in st.session_state:
+    st.session_state.explanations = {}
 
 # --- Shared instructions -------------------------------------------------------
 def playground_developer_instruction() -> str:
@@ -88,6 +92,24 @@ def ekman_developer_instruction() -> str:
         "Remember: Output only the JSON object as described, with all values in the [0, 1] range."
     )
 
+def get_explanation_prompt(mode: str, explain_mode: str) -> str:
+    """
+    Generate explanation prompt based on mode and explanation level.
+    """
+    if explain_mode == "None":
+        return ""
+    
+    if explain_mode == "Short Explanation":
+        if mode == "valence":
+            return "\n\nAfter the JSON, provide a brief one-sentence explanation of why you assigned these sentiment scores."
+        else:
+            return "\n\nAfter the JSON, provide a brief one-sentence explanation of why you assigned these emotion scores."
+    else:  # Long Explanation
+        if mode == "valence":
+            return "\n\nAfter the JSON, provide a detailed explanation (2-3 sentences) of your reasoning for each sentiment score, including specific words or phrases that influenced your assessment."
+        else:
+            return "\n\nAfter the JSON, provide a detailed explanation (2-3 sentences) of your reasoning for the emotion scores, including specific words or phrases that influenced your assessment of each emotion."
+
 # --- Utilities -----------------------------------------------------------------
 def _clip01(x: float) -> float:
     try:
@@ -95,26 +117,37 @@ def _clip01(x: float) -> float:
     except Exception:
         return 0.0
 
-def _safe_json_loads(s: str, mode: str = "valence") -> Dict[str, float]:
+def _safe_json_loads(s: str, mode: str = "valence") -> Tuple[Dict[str, float], str]:
     """
-    Parse JSON object safely, returning a dict with expected keys.
-    For valence: positive/negative/neutral
-    For ekman: happiness/sadness/fear/anger/disgust/contempt/surprise
+    Parse JSON object safely, returning a dict with expected keys and any explanation.
+    Returns (scores_dict, explanation)
     """
+    explanation = ""
+    
+    # Try to extract JSON and explanation separately
+    json_match = re.search(r"\{[^}]*\}", s, flags=re.DOTALL)
+    if json_match:
+        json_str = json_match.group(0)
+        # Get everything after the JSON as explanation
+        json_end = json_match.end()
+        if json_end < len(s):
+            explanation = s[json_end:].strip()
+    else:
+        json_str = s
+    
     try:
-        data = json.loads(s)
+        data = json.loads(json_str)
     except Exception:
-        m = re.search(r"\{.*\}", s, flags=re.DOTALL)
-        data = json.loads(m.group(0)) if m else {}
+        data = {}
     
     if mode == "valence":
-        return {
+        scores = {
             "positive": _clip01(data.get("positive", 0.0)),
             "negative": _clip01(data.get("negative", 0.0)),
             "neutral": _clip01(data.get("neutral", 0.0)),
         }
     else:  # ekman
-        return {
+        scores = {
             "happiness": _clip01(data.get("happiness", 0.0)),
             "sadness": _clip01(data.get("sadness", 0.0)),
             "fear": _clip01(data.get("fear", 0.0)),
@@ -123,6 +156,8 @@ def _safe_json_loads(s: str, mode: str = "valence") -> Dict[str, float]:
             "contempt": _clip01(data.get("contempt", 0.0)),
             "surprise": _clip01(data.get("surprise", 0.0)),
         }
+    
+    return scores, explanation
 
 def _responses_text(resp) -> str:
     """
@@ -286,10 +321,10 @@ class SentimentAnalyzer:
                        "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
 
     # ---------------- DeepSeek (OpenAI-compatible Chat Completions) ------------
-    def analyze_deepseek(self, text: str, api_key: str, mode: str = "valence") -> Dict[str, float]:
+    def analyze_deepseek(self, text: str, api_key: str, mode: str = "valence", text_idx: int = 0) -> Dict[str, float]:
         """
         Analyze sentiment using DeepSeek.
-        Supports both valence and Ekman emotions modes.
+        Supports both valence and Ekman emotions modes with explanations.
         """
         try:
             if not api_key:
@@ -303,6 +338,11 @@ class SentimentAnalyzer:
             client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
             instruction = playground_developer_instruction() if mode == "valence" else ekman_developer_instruction()
+            
+            # Add explanation request if enabled
+            if st.session_state.explain_mode != "None":
+                instruction += get_explanation_prompt(mode, st.session_state.explain_mode)
+            
             user_text = f"Text: {text[:1000]}"
 
             resp = client.chat.completions.create(
@@ -312,11 +352,19 @@ class SentimentAnalyzer:
                     {"role": "user", "content": user_text},
                 ],
                 temperature=0.0,
-                max_tokens=120 if mode == "ekman" else 80,
+                max_tokens=300 if st.session_state.explain_mode == "Long Explanation" else 150,
             )
 
             result_text = (resp.choices[0].message.content or "").strip()
-            return _safe_json_loads(result_text, mode)
+            scores, explanation = _safe_json_loads(result_text, mode)
+            
+            # Store explanation if present
+            if explanation and st.session_state.explain_mode != "None":
+                if "DeepSeek" not in st.session_state.explanations:
+                    st.session_state.explanations["DeepSeek"] = {}
+                st.session_state.explanations["DeepSeek"][text_idx] = explanation
+            
+            return scores
 
         except Exception as e:
             st.error(f"DeepSeek analysis failed: {e}")
@@ -328,11 +376,11 @@ class SentimentAnalyzer:
                 return {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
                        "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
 
-    # ---------------- OpenAI (GPT-5 nano via Responses API) --------------------
-    def analyze_gpt5nano(self, text: str, api_key: str, mode: str = "valence") -> Dict[str, float]:
+    # ---------------- OpenAI (GPT-5 nano via Responses API with GPT-4o fallback) --------------------
+    def analyze_gpt5nano(self, text: str, api_key: str, mode: str = "valence", text_idx: int = 0) -> Dict[str, float]:
         """
-        Analyze sentiment using OpenAI GPT-5 nano via Responses API.
-        Supports both valence and Ekman emotions modes.
+        Analyze sentiment using OpenAI GPT-5 nano via Responses API with GPT-4o fallback.
+        Supports both valence and Ekman emotions modes with explanations.
         """
         try:
             if not api_key:
@@ -345,72 +393,119 @@ class SentimentAnalyzer:
 
             client = OpenAI(api_key=api_key)
             instruction = playground_developer_instruction() if mode == "valence" else ekman_developer_instruction()
+            
+            # Add explanation request if enabled
+            if st.session_state.explain_mode != "None":
+                instruction += get_explanation_prompt(mode, st.session_state.explain_mode)
 
-            # Build schema based on mode
-            if mode == "valence":
-                schema_obj = {
-                    "type": "object",
-                    "properties": {
-                        "positive": {"type": "number", "minimum": 0, "maximum": 1},
-                        "negative": {"type": "number", "minimum": 0, "maximum": 1},
-                        "neutral":  {"type": "number", "minimum": 0, "maximum": 1},
-                    },
-                    "required": ["positive", "negative", "neutral"],
-                    "additionalProperties": False,
-                }
-                schema_name = "SentimentScores"
-            else:  # ekman
-                schema_obj = {
-                    "type": "object",
-                    "properties": {
-                        "happiness": {"type": "number", "minimum": 0, "maximum": 1},
-                        "sadness": {"type": "number", "minimum": 0, "maximum": 1},
-                        "fear": {"type": "number", "minimum": 0, "maximum": 1},
-                        "anger": {"type": "number", "minimum": 0, "maximum": 1},
-                        "disgust": {"type": "number", "minimum": 0, "maximum": 1},
-                        "contempt": {"type": "number", "minimum": 0, "maximum": 1},
-                        "surprise": {"type": "number", "minimum": 0, "maximum": 1},
-                    },
-                    "required": ["happiness", "sadness", "fear", "anger", "disgust", "contempt", "surprise"],
-                    "additionalProperties": False,
-                }
-                schema_name = "EkmanEmotions"
+            # Try GPT-5 nano first
+            try:
+                # Build schema based on mode
+                if mode == "valence":
+                    schema_obj = {
+                        "type": "object",
+                        "properties": {
+                            "positive": {"type": "number", "minimum": 0, "maximum": 1},
+                            "negative": {"type": "number", "minimum": 0, "maximum": 1},
+                            "neutral":  {"type": "number", "minimum": 0, "maximum": 1},
+                        },
+                        "required": ["positive", "negative", "neutral"],
+                        "additionalProperties": False,
+                    }
+                    schema_name = "SentimentScores"
+                else:  # ekman
+                    schema_obj = {
+                        "type": "object",
+                        "properties": {
+                            "happiness": {"type": "number", "minimum": 0, "maximum": 1},
+                            "sadness": {"type": "number", "minimum": 0, "maximum": 1},
+                            "fear": {"type": "number", "minimum": 0, "maximum": 1},
+                            "anger": {"type": "number", "minimum": 0, "maximum": 1},
+                            "disgust": {"type": "number", "minimum": 0, "maximum": 1},
+                            "contempt": {"type": "number", "minimum": 0, "maximum": 1},
+                            "surprise": {"type": "number", "minimum": 0, "maximum": 1},
+                        },
+                        "required": ["happiness", "sadness", "fear", "anger", "disgust", "contempt", "surprise"],
+                        "additionalProperties": False,
+                    }
+                    schema_name = "EkmanEmotions"
 
-            include_list = ["reasoning.encrypted_content"] if st.session_state.debug_mode else []
+                # Don't use JSON schema if we want explanations
+                if st.session_state.explain_mode == "None":
+                    text_format = {
+                        "format": {
+                            "type": "json_schema",
+                            "name": schema_name,
+                            "schema": schema_obj,
+                        },
+                        "verbosity": "low",
+                    }
+                else:
+                    text_format = {"verbosity": "medium"}
 
-            resp = client.responses.create(
-                model="gpt-5-nano",
-                input=[
-                    {"role": "developer", "content": [{"type": "input_text", "text": instruction}]},
-                    {"role": "user", "content": [{"type": "input_text", "text": f"Text: {text[:1000]}"}]},
-                ],
-                text={
-                    "format": {
-                        "type": "json_schema",
-                        "name": schema_name,
-                        "schema": schema_obj,
-                    },
-                    "verbosity": "low",
-                },
-                reasoning={"effort": "low"},
-                tools=[],
-                store=False,
-                include=include_list,
-                max_output_tokens=150 if mode == "ekman" else 120,
-                temperature=0.0,
-            )
+                include_list = ["reasoning.encrypted_content"] if st.session_state.debug_mode else []
 
-            if st.session_state.debug_mode:
-                st.code(resp.model_dump_json(indent=2) if hasattr(resp, "model_dump_json") else str(resp))
+                resp = client.responses.create(
+                    model="gpt-5-nano",
+                    input=[
+                        {"role": "developer", "content": [{"type": "input_text", "text": instruction}]},
+                        {"role": "user", "content": [{"type": "input_text", "text": f"Text: {text[:1000]}"}]},
+                    ],
+                    text=text_format,
+                    reasoning={"effort": "low"},
+                    tools=[],
+                    store=False,
+                    include=include_list,
+                    max_output_tokens=300 if st.session_state.explain_mode == "Long Explanation" else 150,
+                    temperature=0.0,
+                )
 
-            out = _responses_text(resp).strip()
-            if st.session_state.debug_mode:
-                st.code(f"GPT-5 nano output_text:\n{out}")
+                if st.session_state.debug_mode:
+                    st.code(resp.model_dump_json(indent=2) if hasattr(resp, "model_dump_json") else str(resp))
 
-            return _safe_json_loads(out, mode)
+                out = _responses_text(resp).strip()
+                if st.session_state.debug_mode:
+                    st.code(f"GPT-5 nano output_text:\n{out}")
+
+                scores, explanation = _safe_json_loads(out, mode)
+                
+                # Store explanation if present
+                if explanation and st.session_state.explain_mode != "None":
+                    if "GPT-5 nano" not in st.session_state.explanations:
+                        st.session_state.explanations["GPT-5 nano"] = {}
+                    st.session_state.explanations["GPT-5 nano"][text_idx] = explanation
+                
+                return scores
+
+            except Exception as nano_error:
+                # Fallback to GPT-4o
+                st.info("📋 GPT-5 nano unavailable, using GPT-4o fallback...")
+                
+                messages = [
+                    {"role": "system", "content": instruction},
+                    {"role": "user", "content": f"Text: {text[:1000]}"}
+                ]
+                
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=messages,
+                    temperature=0.0,
+                    max_tokens=300 if st.session_state.explain_mode == "Long Explanation" else 150,
+                )
+                
+                result_text = response.choices[0].message.content
+                scores, explanation = _safe_json_loads(result_text, mode)
+                
+                # Store explanation if present
+                if explanation and st.session_state.explain_mode != "None":
+                    if "GPT-4o (fallback)" not in st.session_state.explanations:
+                        st.session_state.explanations["GPT-4o (fallback)"] = {}
+                    st.session_state.explanations["GPT-4o (fallback)"][text_idx] = explanation
+                
+                return scores
 
         except Exception as e:
-            st.error(f"GPT-5 nano analysis failed: {e}")
+            st.error(f"OpenAI analysis failed: {e}")
             if st.session_state.debug_mode:
                 st.exception(e)
             if mode == "valence":
@@ -420,7 +515,7 @@ class SentimentAnalyzer:
                        "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
 
     # ---------------- Dispatcher ----------------
-    def analyze_text(self, text: str, model: str, api_keys: Dict[str, str], mode: str = "valence") -> Dict[str, float]:
+    def analyze_text(self, text: str, model: str, api_keys: Dict[str, str], mode: str = "valence", text_idx: int = 0) -> Dict[str, float]:
         """Dispatch to the selected model."""
         if model == "VADER":
             return self.analyze_vader(text)
@@ -429,9 +524,9 @@ class SentimentAnalyzer:
         if model == "BART":
             return self.analyze_bart(text, api_keys.get("Entresent_HF_API", ""), mode)
         if model == "DeepSeek":
-            return self.analyze_deepseek(text, api_keys.get("Entresent_DS_API", ""), mode)
+            return self.analyze_deepseek(text, api_keys.get("Entresent_DS_API", ""), mode, text_idx)
         if model == "GPT-5 nano":
-            return self.analyze_gpt5nano(text, api_keys.get("Entresent_OAI_API", ""), mode)
+            return self.analyze_gpt5nano(text, api_keys.get("Entresent_OAI_API", ""), mode, text_idx)
         
         # Default return based on mode
         if mode == "valence":
@@ -483,15 +578,16 @@ def create_results_dataframe(texts: List[str], results: Dict, truncate: bool = T
 
 # --- App -----------------------------------------------------------------------
 def main() -> None:
-    st.title("🎭 Sentiment Analysis Toolbox")
-    st.markdown("Analyze text sentiment using multiple state-of-the-art models.")
-
-    # ---------------- Sidebar: Config ----------------
+    # Header
+    st.title("🎭 Entresent 😊")
+    st.markdown("*Advanced sentiment and emotion analysis using state-of-the-art AI models. Analyze text to understand emotional valence (positive/negative/neutral) or detect specific emotions using Ekman's framework.*")
+    
+    # ---------------- Sidebar: Config (reordered) ----------------
     with st.sidebar:
         st.header("⚙️ Configuration")
         
-        # Mode Selection
-        st.subheader("Analysis Mode")
+        # 1. Analysis Mode (first)
+        st.subheader("1. Analysis Mode")
         analysis_mode = st.radio(
             "Select analysis type:",
             ["Valence", "Ekman Emotions"],
@@ -500,182 +596,217 @@ def main() -> None:
         
         st.divider()
         
-        # API Keys
-        st.subheader("API Keys")
-        
-        if analysis_mode == "Valence":
-            st.info(
-                "ℹ️ VADER runs locally. SiEBERT & BART use Hugging Face API. "
-                "DeepSeek and GPT-5 nano require their respective API keys."
-            )
-        else:  # Ekman Emotions
-            st.info(
-                "ℹ️ Ekman Emotions mode uses BART, DeepSeek, and GPT-5 nano only. "
-                "All require API keys."
-            )
-
-        with st.expander("📚 How to get API keys"):
-            st.markdown(
-                """
-- **Hugging Face API Key**: https://huggingface.co/settings/tokens  
-- **DeepSeek API Key**: https://platform.deepseek.com/  
-- **OpenAI API Key**: https://platform.openai.com/api-keys
-"""
-            )
-
-        use_secrets = st.checkbox("Use Streamlit Secrets", value=True)
-
-        api_keys: Dict[str, str] = {}
-        if use_secrets:
-            try:
-                api_keys["Entresent_HF_API"] = st.secrets.get("Entresent_HF_API", "")
-                api_keys["Entresent_DS_API"] = st.secrets.get("Entresent_DS_API", "")
-                api_keys["Entresent_OAI_API"] = st.secrets.get("Entresent_OAI_API", "")
-                st.success("Using API keys from Streamlit secrets")
-            except Exception:
-                st.warning("Secrets not configured. Please add API keys manually.")
-                api_keys["Entresent_HF_API"] = st.text_input(
-                    "Hugging Face API Key (required for SiEBERT/BART)", type="password"
-                )
-                api_keys["Entresent_DS_API"] = st.text_input("DeepSeek API Key", type="password")
-                api_keys["Entresent_OAI_API"] = st.text_input("OpenAI API Key (for GPT-5 nano)", type="password")
-        else:
-            api_keys["Entresent_HF_API"] = st.text_input(
-                "Hugging Face API Key (required for SiEBERT/BART)", type="password"
-            )
-            api_keys["Entresent_DS_API"] = st.text_input("DeepSeek API Key", type="password")
-            api_keys["Entresent_OAI_API"] = st.text_input("OpenAI API Key (for GPT-5 nano)", type="password")
-
-        st.divider()
-
-        # Model Selection
-        st.subheader("Model Selection")
+        # 2. Model Selection (second)
+        st.subheader("2. Model Selection")
         
         if analysis_mode == "Valence":
             available_models = ["VADER", "SiEBERT", "BART", "DeepSeek", "GPT-5 nano"]
-            models_status = [
-                "✅ VADER (ready)",
-                "✅ SiEBERT" if api_keys.get("Entresent_HF_API") else "❌ SiEBERT (HF API key required)",
-                "✅ BART" if api_keys.get("Entresent_HF_API") else "❌ BART (HF API key required)",
-                "✅ DeepSeek" if api_keys.get("Entresent_DS_API") else "⚠️ DeepSeek (API key missing)",
-                "✅ GPT-5 nano" if api_keys.get("Entresent_OAI_API") else "⚠️ GPT-5 nano (API key missing)",
-            ]
         else:  # Ekman Emotions
             available_models = ["BART", "DeepSeek", "GPT-5 nano"]
-            models_status = [
-                "✅ BART" if api_keys.get("Entresent_HF_API") else "❌ BART (HF API key required)",
-                "✅ DeepSeek" if api_keys.get("Entresent_DS_API") else "⚠️ DeepSeek (API key missing)",
-                "✅ GPT-5 nano" if api_keys.get("Entresent_OAI_API") else "⚠️ GPT-5 nano (API key missing)",
-            ]
         
-        with st.expander("Model Availability", expanded=False):
-            for status in models_status:
-                st.write(status)
-
         benchmark_mode = st.checkbox("🏁 Benchmark Mode (Run all available models)", value=False)
-
-        with st.expander("🔧 Advanced Settings", expanded=False):
-            debug_mode = st.checkbox(
-                "Enable Debug Mode", value=False, help="Show raw outputs and tracebacks for troubleshooting"
-            )
-            st.session_state.debug_mode = debug_mode
-
+        
         if not benchmark_mode:
             selected_model = st.selectbox("Select Model", available_models)
             models_to_run = [selected_model]
         else:
             models_to_run = available_models
             st.info(f"Running all {len(models_to_run)} models")
-
-    # ---------------- Main: Input & Settings ----------------
-    col1, col2 = st.columns([1, 1], gap="large")
-
-    with col1:
-        st.subheader("📝 Input Text")
-        input_method = st.radio("Input Method", ["Text Area", "File Upload"], horizontal=True)
-
-        texts: List[str] = []
-        if input_method == "Text Area":
-            text_input = st.text_area(
-                "Enter texts (one per line)",
-                height=200,
-                placeholder="Enter your first text here\nEnter your second text here\n...",
-            )
-            if text_input:
-                texts = [t.strip() for t in text_input.split("\n") if t.strip()]
-        else:
-            uploaded_file = st.file_uploader("Upload CSV or Excel file", type=["csv", "xlsx", "xls"])
-            if uploaded_file:
-                texts = load_texts_from_file(uploaded_file)
-                st.success(f"Loaded {len(texts)} texts from file")
-
-    with col2:
-        st.subheader("🎯 Analysis Settings")
-        st.info(f"**Mode:** {analysis_mode}")
-        st.info(f"**Texts to analyze:** {len(texts)}")
-        st.info(f"**Models to run:** {', '.join(models_to_run)}")
-
-        missing_keys = []
-        if not benchmark_mode:
-            if selected_model in ["SiEBERT", "BART"] and not api_keys.get("Entresent_HF_API"):
-                missing_keys.append(f"Hugging Face API key (required for {selected_model})")
-            if selected_model == "DeepSeek" and not api_keys.get("Entresent_DS_API"):
-                missing_keys.append("DeepSeek API key")
-            if selected_model == "GPT-5 nano" and not api_keys.get("Entresent_OAI_API"):
-                missing_keys.append("OpenAI API key")
-        else:
-            if analysis_mode == "Valence" and not api_keys.get("Entresent_HF_API"):
-                missing_keys.append("Hugging Face API key (for SiEBERT & BART)")
-            elif analysis_mode == "Ekman Emotions" and not api_keys.get("Entresent_HF_API"):
-                missing_keys.append("Hugging Face API key (for BART)")
-            if not api_keys.get("Entresent_DS_API"):
-                missing_keys.append("DeepSeek API key")
-            if not api_keys.get("Entresent_OAI_API"):
-                missing_keys.append("OpenAI API key")
-
-        if missing_keys:
-            st.warning(f"⚠️ Missing: {', '.join(missing_keys)}")
-
-        run_button = st.button("🚀 Analyze", type="primary", disabled=len(texts) == 0)
-
-    # ---------------- Execution ----------------
-    if run_button and texts:
-        analyzer = SentimentAnalyzer()
-        results: Dict[str, List[Dict[str, float]]] = {}
-
-        total_ops = max(1, len(models_to_run) * len(texts))
-        progress = st.progress(0)
-        status = st.empty()
-        op = 0
         
-        mode = analysis_mode.lower().replace(" ", "_")
-        if mode == "ekman_emotions":
-            mode = "ekman"
+        st.divider()
+        
+        # 3. API Keys (third)
+        st.subheader("3. API Keys")
+        
+        # Retrieve API keys (simplified without the info messages here)
+        use_secrets = st.checkbox("Use Streamlit Secrets", value=True)
+        
+        api_keys: Dict[str, str] = {}
+        if use_secrets:
+            try:
+                api_keys["Entresent_HF_API"] = st.secrets.get("Entresent_HF_API", "")
+                api_keys["Entresent_DS_API"] = st.secrets.get("Entresent_DS_API", "")
+                api_keys["Entresent_OAI_API"] = st.secrets.get("Entresent_OAI_API", "")
+                st.success("✅ Using Streamlit secrets")
+            except Exception:
+                st.warning("Secrets not configured")
+                api_keys["Entresent_HF_API"] = st.text_input("Hugging Face API Key", type="password")
+                api_keys["Entresent_DS_API"] = st.text_input("DeepSeek API Key", type="password")
+                api_keys["Entresent_OAI_API"] = st.text_input("OpenAI API Key", type="password")
+        else:
+            api_keys["Entresent_HF_API"] = st.text_input("Hugging Face API Key", type="password")
+            api_keys["Entresent_DS_API"] = st.text_input("DeepSeek API Key", type="password")
+            api_keys["Entresent_OAI_API"] = st.text_input("OpenAI API Key", type="password")
+        
+        # Model availability check
+        if analysis_mode == "Valence":
+            models_status = [
+                "✅ VADER" if "VADER" in available_models else "",
+                "✅ SiEBERT" if api_keys.get("Entresent_HF_API") and "SiEBERT" in available_models else "❌ SiEBERT",
+                "✅ BART" if api_keys.get("Entresent_HF_API") and "BART" in available_models else "❌ BART",
+                "✅ DeepSeek" if api_keys.get("Entresent_DS_API") else "⚠️ DeepSeek",
+                "✅ GPT-5 nano" if api_keys.get("Entresent_OAI_API") else "⚠️ GPT-5 nano",
+            ]
+        else:
+            models_status = [
+                "✅ BART" if api_keys.get("Entresent_HF_API") else "❌ BART",
+                "✅ DeepSeek" if api_keys.get("Entresent_DS_API") else "⚠️ DeepSeek",
+                "✅ GPT-5 nano" if api_keys.get("Entresent_OAI_API") else "⚠️ GPT-5 nano",
+            ]
+        
+        with st.expander("Model Availability", expanded=False):
+            for status in models_status:
+                if status:
+                    st.write(status)
+        
+        with st.expander("📚 API Key Help", expanded=False):
+            st.markdown(
+                """
+- **Hugging Face**: https://huggingface.co/settings/tokens  
+- **DeepSeek**: https://platform.deepseek.com/  
+- **OpenAI**: https://platform.openai.com/api-keys
+"""
+            )
+        
+        st.divider()
+        
+        # 4. Advanced Settings (last)
+        st.subheader("4. Advanced Settings")
+        
+        with st.expander("🔧 Advanced Options", expanded=False):
+            debug_mode = st.checkbox(
+                "Enable Debug Mode", 
+                value=False, 
+                help="Show raw outputs and tracebacks"
+            )
+            st.session_state.debug_mode = debug_mode
+            
+            st.divider()
+            
+            # Explainable AI settings
+            st.markdown("**🤖 Explainable AI**")
+            explain_mode = st.selectbox(
+                "Explanation Level (OpenAI & DeepSeek)",
+                ["None", "Short Explanation", "Long Explanation"],
+                help="Get AI reasoning for sentiment/emotion scores"
+            )
+            st.session_state.explain_mode = explain_mode
+            
+            if explain_mode != "None":
+                st.info(f"💡 {explain_mode} enabled for OpenAI and DeepSeek models")
 
-        for model in models_to_run:
-            status.text(f"Running {model}...")
-            model_results: List[Dict[str, float]] = []
-            for t in texts:
-                try:
-                    scores = analyzer.analyze_text(t, model, api_keys, mode)
-                except Exception as e:
-                    st.error(f"{model} failed on a text: {e}")
-                    if st.session_state.debug_mode:
-                        st.exception(e)
-                    if mode == "valence":
-                        scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
-                    else:
-                        scores = {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
-                                "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
-                model_results.append(scores)
-                op += 1
-                progress.progress(op / total_ops)
-            results[model] = model_results
-
-        progress.empty()
-        status.empty()
-        st.session_state.results = (texts, results, analysis_mode)
-        st.success("✅ Analysis complete!")
+    # ---------------- Main content area (full width) ----------------
+    # Input section
+    st.subheader("📝 Input Text")
+    
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        input_method = st.radio("Input Method", ["Text Area", "File Upload"], horizontal=True)
+    
+    texts: List[str] = []
+    if input_method == "Text Area":
+        text_input = st.text_area(
+            "Enter texts (one per line)",
+            height=200,
+            placeholder="Enter your first text here\nEnter your second text here\n...",
+        )
+        if text_input:
+            texts = [t.strip() for t in text_input.split("\n") if t.strip()]
+    else:
+        uploaded_file = st.file_uploader("Upload CSV or Excel file", type=["csv", "xlsx", "xls"])
+        if uploaded_file:
+            texts = load_texts_from_file(uploaded_file)
+            st.success(f"✅ Loaded {len(texts)} texts from file")
+    
+    # Analysis settings section
+    st.subheader("🎯 Analysis Settings")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Analysis Mode", analysis_mode)
+    with col2:
+        st.metric("Texts to Analyze", len(texts))
+    with col3:
+        st.metric("Models to Run", len(models_to_run))
+    
+    # Check for missing keys
+    missing_keys = []
+    if not benchmark_mode:
+        if selected_model in ["SiEBERT", "BART"] and not api_keys.get("Entresent_HF_API"):
+            missing_keys.append(f"Hugging Face API key (for {selected_model})")
+        if selected_model == "DeepSeek" and not api_keys.get("Entresent_DS_API"):
+            missing_keys.append("DeepSeek API key")
+        if selected_model == "GPT-5 nano" and not api_keys.get("Entresent_OAI_API"):
+            missing_keys.append("OpenAI API key")
+    else:
+        if "BART" in models_to_run and not api_keys.get("Entresent_HF_API"):
+            missing_keys.append("Hugging Face API key")
+        if "DeepSeek" in models_to_run and not api_keys.get("Entresent_DS_API"):
+            missing_keys.append("DeepSeek API key")
+        if "GPT-5 nano" in models_to_run and not api_keys.get("Entresent_OAI_API"):
+            missing_keys.append("OpenAI API key")
+    
+    if missing_keys:
+        st.warning(f"⚠️ Missing: {', '.join(missing_keys)}")
+    
+    # Clear explanations when starting new analysis
+    if st.button("🚀 **ANALYZE**", type="primary", disabled=len(texts) == 0, use_container_width=True):
+        st.session_state.explanations = {}
+    
+    # ---------------- Execution ----------------
+    if st.button("", key="dummy_button", disabled=True):  # Hidden button for logic
+        pass
+    
+    if len(texts) > 0 and st.session_state.get('run_analysis', False):
+        st.session_state['run_analysis'] = False  # Reset flag
+    
+    # Check if button was pressed
+    if 'dummy_button' not in st.session_state:
+        st.session_state['dummy_button'] = False
+    
+    # The actual analysis trigger
+    col1, col2, col3 = st.columns([1, 3, 1])
+    with col2:
+        if st.button("🚀 **ANALYZE SENTIMENT**", type="primary", disabled=len(texts) == 0, key="analyze_btn", use_container_width=True):
+            if texts:
+                st.session_state.explanations = {}  # Clear previous explanations
+                analyzer = SentimentAnalyzer()
+                results: Dict[str, List[Dict[str, float]]] = {}
+                
+                total_ops = max(1, len(models_to_run) * len(texts))
+                progress = st.progress(0)
+                status = st.empty()
+                op = 0
+                
+                mode = analysis_mode.lower().replace(" ", "_")
+                if mode == "ekman_emotions":
+                    mode = "ekman"
+                
+                for model in models_to_run:
+                    status.text(f"Running {model}...")
+                    model_results: List[Dict[str, float]] = []
+                    for idx, t in enumerate(texts):
+                        try:
+                            scores = analyzer.analyze_text(t, model, api_keys, mode, idx)
+                        except Exception as e:
+                            st.error(f"{model} failed on text {idx+1}: {e}")
+                            if st.session_state.debug_mode:
+                                st.exception(e)
+                            if mode == "valence":
+                                scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
+                            else:
+                                scores = {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
+                                        "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
+                        model_results.append(scores)
+                        op += 1
+                        progress.progress(op / total_ops)
+                    results[model] = model_results
+                
+                progress.empty()
+                status.empty()
+                st.session_state.results = (texts, results, analysis_mode)
+                st.success("✅ Analysis complete!")
+                st.rerun()
 
     # ---------------- Results ----------------
     if st.session_state.results:
@@ -683,22 +814,40 @@ def main() -> None:
         st.divider()
         st.subheader(f"📊 Results - {result_mode}")
 
-        colA, colB, colC = st.columns([1, 1, 1])
-        with colA:
+        # Options row
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
             show_full_text = st.checkbox("Show full text", value=False)
-        with colB:
+        with col2:
             highlight_max = st.checkbox("Highlight max values", value=True)
-        with colC:
+        with col3:
+            show_explanations = st.checkbox("Show explanations", value=st.session_state.explain_mode != "None")
+        with col4:
             download_format = st.selectbox("Download format", ["CSV", "Excel"])
 
+        # Results DataFrame
         df_results = create_results_dataframe(texts, results, truncate=not show_full_text)
 
         if highlight_max:
             score_cols = [c for c in df_results.columns if c != "Text"]
             styled = df_results.style.highlight_max(subset=score_cols, color="lightgreen", axis=1)
-            st.dataframe(styled, use_container_width=True)
+            st.dataframe(styled, width="stretch")
         else:
-            st.dataframe(df_results, use_container_width=True)
+            st.dataframe(df_results, width="stretch")
+
+        # Show explanations if available
+        if show_explanations and st.session_state.explanations:
+            st.divider()
+            st.subheader("💡 AI Explanations")
+            
+            for model_name, model_explanations in st.session_state.explanations.items():
+                if model_explanations:
+                    with st.expander(f"{model_name} Explanations", expanded=True):
+                        for text_idx, explanation in model_explanations.items():
+                            text_preview = texts[text_idx][:100] + "..." if len(texts[text_idx]) > 100 else texts[text_idx]
+                            st.markdown(f"**Text {text_idx + 1}:** {text_preview}")
+                            st.markdown(f"*{explanation}*")
+                            st.divider()
 
         # Downloads
         if download_format == "CSV":
@@ -721,7 +870,7 @@ def main() -> None:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             except Exception as e:
-                st.error(f"Excel export failed (install openpyxl). Falling back to CSV. Error: {e}")
+                st.error(f"Excel export failed. Falling back to CSV. Error: {e}")
                 csv_data = df_results.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     label="📥 Download Results as CSV",
@@ -730,7 +879,7 @@ def main() -> None:
                     mime="text/csv",
                 )
 
-        # Summary (only meaningful when multiple models ran)
+        # Summary statistics (only for multiple models)
         if len(results) > 1:
             st.divider()
             st.subheader("📈 Summary Statistics")
@@ -751,7 +900,7 @@ def main() -> None:
                 summary_rows.append(row)
             
             df_summary = pd.DataFrame(summary_rows)
-            st.dataframe(df_summary, use_container_width=True)
+            st.dataframe(df_summary, width="stretch")
             
             # Create bar chart
             chart_data = df_summary.set_index("Model")
