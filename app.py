@@ -43,7 +43,9 @@ def playground_developer_instruction() -> str:
     Reused for GPT-5 (Responses) and for DeepSeek (as a system message).
     """
     return (
-        "Analyze the sentiment of the provided text and score its positive, negative, and neutral "
+        "Analyze the sentiment of the provided text and score its positive, negative, and neutral."
+        "What's the probability of each valence (positive, negative, neutral) being present?"
+        "Evaluate the probability and not the intensity!"
         "sentiment independently.\n\n"
         "- For a given input text, output only a JSON object with the following structure "
         '(do not include any explanations, notes, or code fences):\n'
@@ -70,6 +72,8 @@ def ekman_developer_instruction() -> str:
     """
     return (
         "Analyze the emotions in the provided text and score each Ekman emotion "
+        "What's the probability of each emotion being present?"
+        "Evaluate the probability and not the intensity!"
         "independently.\n\n"
         "- For a given input text, output only a JSON object with the following structure "
         '(do not include any explanations, notes, or code fences):\n'
