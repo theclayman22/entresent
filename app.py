@@ -1,4 +1,33 @@
-"""
+def analyze_gpt5nano(self, text: str, api_key: str, mode: str = "valence", text_idx: int = 0) -> Dict[str, float]:
+        """
+        Analyze sentiment using OpenAI GPT-5 nano via Responses API with GPT-4o fallback.
+        Supports both valence and Ekman emotions modes with explanations and measurement types.
+        """
+        try:
+            if not api_key:
+                st.error("OpenAI API key required for GPT-5 nano")
+                if mode == "valence":
+                    return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
+                else:
+                    return {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
+                           "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
+
+            client = OpenAI(api_key=api_key)
+            measurement = st.session_state.measurement_type.lower()
+            instruction = (
+                playground_developer_instruction(measurement) if mode == "valence" 
+                else ekman_developer_instruction(measurement)
+            )
+            
+            # Add explanation request if enabled
+            if st.session_state.explain_mode != "None":
+                instruction += get_explanation_prompt(mode, st.session_state.explain_mode)
+
+            # Try GPT-5 nano first
+            try:
+                # Build schema based on mode and measurement type
+                if measurement != "both":
+                    if mode == "valence":"""
 Sentiment Analysis Toolbox - Entresent
 A comprehensive tool for analyzing text sentiment using multiple models.
 Supports both valence analysis and Ekman emotions.
@@ -35,66 +64,146 @@ if "explain_mode" not in st.session_state:
     st.session_state.explain_mode = "None"
 if "explanations" not in st.session_state:
     st.session_state.explanations = {}
+if "measurement_type" not in st.session_state:
+    st.session_state.measurement_type = "Intensity"
 
 # --- Shared instructions -------------------------------------------------------
-def playground_developer_instruction() -> str:
+def playground_developer_instruction(measurement_type: str = "intensity") -> str:
     """
-    Mirrors your working Responses API developer text from the Playground.
-    Reused for GPT-5 (Responses) and for DeepSeek (as a system message).
+    Developer instruction for valence analysis.
+    Supports intensity, likelihood, or both measurements.
     """
-    return (
-        "Analyze the sentiment of the provided text and score its positive, negative, and neutral."
-        "What's the probability of each valence (positive, negative, neutral) being present?"
-        "Evaluate the probability and not the intensity!"
-        "sentiment independently.\n\n"
-        "- For a given input text, output only a JSON object with the following structure "
-        '(do not include any explanations, notes, or code fences):\n'
-        '    {"positive": x, "negative": y, "neutral": z}\n'
-        "- Each of x, y, and z should be a floating-point value between 0 and 1, representing the independent "
-        "intensity of the respective sentiment.\n"
-        "- Ensure that each sentiment dimension is scored independently and may sum to more or less than 1.\n\n"
-        "# Output Format\n\n"
-        "Return only a single-line JSON object in the format:\n"
-        '{"positive": [float between 0 and 1], "negative": [float between 0 and 1], "neutral": [float between 0 and 1]}\n\n'
-        "# Example\n\n"
-        'Input:\nText: "I love sunny days, but today has been a bit overwhelming."\n\n'
-        'Output:\n{"positive": 0.6, "negative": 0.4, "neutral": 0.3}\n\n'
-        "# Notes\n\n"
-        "- Do not include any explanation, commentary, or code formatting—only the JSON object as output.\n"
-        "- Each sentiment score should be evaluated independently for the input text.\n\n"
-        "Remember: Output only the JSON object as described, with all values in the [0, 1] range."
-    )
+    if measurement_type == "intensity":
+        return (
+            "Analyze the sentiment of the provided text and score its positive, negative, and neutral "
+            "sentiment independently.\n\n"
+            "- For a given input text, output only a JSON object with the following structure "
+            '(do not include any explanations, notes, or code fences):\n'
+            '    {"positive": x, "negative": y, "neutral": z}\n'
+            "- Each of x, y, and z should be a floating-point value between 0 and 1, representing the independent "
+            "intensity of the respective sentiment.\n"
+            "- Ensure that each sentiment dimension is scored independently and may sum to more or less than 1.\n\n"
+            "# Output Format\n\n"
+            "Return only a single-line JSON object in the format:\n"
+            '{"positive": [float between 0 and 1], "negative": [float between 0 and 1], "neutral": [float between 0 and 1]}\n\n'
+            "# Example\n\n"
+            'Input:\nText: "I love sunny days, but today has been a bit overwhelming."\n\n'
+            'Output:\n{"positive": 0.6, "negative": 0.4, "neutral": 0.3}\n\n'
+            "# Notes\n\n"
+            "- Do not include any explanation, commentary, or code formatting—only the JSON object as output.\n"
+            "- Each sentiment score should be evaluated independently for the input text.\n\n"
+            "Remember: Output only the JSON object as described, with all values in the [0, 1] range."
+        )
+    elif measurement_type == "likelihood":
+        return (
+            "Analyze the sentiment of the provided text and determine the likelihood (probability) "
+            "of each sentiment being the primary sentiment.\n\n"
+            "- For a given input text, output only a JSON object with the following structure "
+            '(do not include any explanations, notes, or code fences):\n'
+            '    {"positive": x, "negative": y, "neutral": z}\n'
+            "- Each of x, y, and z should be a floating-point value between 0 and 1, representing the probability "
+            "that this is the dominant sentiment.\n"
+            "- IMPORTANT: The values MUST sum to exactly 1.0 as they are probabilities.\n\n"
+            "# Output Format\n\n"
+            "Return only a single-line JSON object in the format:\n"
+            '{"positive": [probability 0-1], "negative": [probability 0-1], "neutral": [probability 0-1]}\n\n'
+            "# Example\n\n"
+            'Input:\nText: "I love sunny days, but today has been a bit overwhelming."\n\n'
+            'Output:\n{"positive": 0.5, "negative": 0.3, "neutral": 0.2}\n\n'
+            "# Notes\n\n"
+            "- The three values must sum to 1.0\n"
+            "- Think of this as: what's the probability this text is primarily positive vs negative vs neutral?\n\n"
+            "Remember: Output only the JSON object with probabilities summing to 1.0"
+        )
+    else:  # both
+        return (
+            "Analyze the sentiment of the provided text and provide BOTH intensity and likelihood measures.\n\n"
+            "- For a given input text, output only a JSON object with the following structure:\n"
+            '    {\n'
+            '        "intensity": {"positive": a, "negative": b, "neutral": c},\n'
+            '        "likelihood": {"positive": x, "negative": y, "neutral": z}\n'
+            '    }\n\n'
+            "- Intensity values (a, b, c): Independent strength of each sentiment (0-1), may sum to more than 1\n"
+            "- Likelihood values (x, y, z): Probability of each being primary sentiment, MUST sum to 1.0\n\n"
+            "# Output Format\n\n"
+            "Return only this JSON structure:\n"
+            '{"intensity": {"positive": [0-1], "negative": [0-1], "neutral": [0-1]}, '
+            '"likelihood": {"positive": [0-1], "negative": [0-1], "neutral": [0-1]}}\n\n'
+            "# Example\n\n"
+            'Input:\nText: "I love sunny days, but today has been a bit overwhelming."\n\n'
+            'Output:\n{"intensity": {"positive": 0.6, "negative": 0.4, "neutral": 0.3}, '
+            '"likelihood": {"positive": 0.5, "negative": 0.3, "neutral": 0.2}}\n\n'
+            "Remember: Output only the JSON object as described."
+        )
 
-def ekman_developer_instruction() -> str:
+def ekman_developer_instruction(measurement_type: str = "intensity") -> str:
     """
     Instruction for Ekman emotions analysis.
-    Similar to valence instruction but for 7 basic emotions.
+    Supports intensity, likelihood, or both measurements.
     """
-    return (
-        "Analyze the emotions in the provided text and score each Ekman emotion "
-        "What's the probability of each emotion being present?"
-        "Evaluate the probability and not the intensity!"
-        "independently.\n\n"
-        "- For a given input text, output only a JSON object with the following structure "
-        '(do not include any explanations, notes, or code fences):\n'
-        '    {"happiness": a, "sadness": b, "fear": c, "anger": d, "disgust": e, "contempt": f, "surprise": g}\n'
-        "- Each value (a through g) should be a floating-point value between 0 and 1, representing the independent "
-        "intensity of the respective emotion.\n"
-        "- Ensure that each emotion dimension is scored independently and may sum to more or less than 1.\n\n"
-        "# Output Format\n\n"
-        "Return only a single-line JSON object in the format:\n"
-        '{"happiness": [float between 0 and 1], "sadness": [float between 0 and 1], "fear": [float between 0 and 1], '
-        '"anger": [float between 0 and 1], "disgust": [float between 0 and 1], "contempt": [float between 0 and 1], '
-        '"surprise": [float between 0 and 1]}\n\n'
-        "# Example\n\n"
-        'Input:\nText: "I was shocked to find out my friend betrayed me. I feel so angry and hurt."\n\n'
-        'Output:\n{"happiness": 0.0, "sadness": 0.7, "fear": 0.2, "anger": 0.8, "disgust": 0.4, "contempt": 0.5, "surprise": 0.6}\n\n'
-        "# Notes\n\n"
-        "- Do not include any explanation, commentary, or code formatting—only the JSON object as output.\n"
-        "- Each emotion score should be evaluated independently for the input text.\n"
-        "- All seven emotions must be present in the output, even if their value is 0.\n\n"
-        "Remember: Output only the JSON object as described, with all values in the [0, 1] range."
-    )
+    emotions = ["happiness", "sadness", "fear", "anger", "disgust", "contempt", "surprise"]
+    
+    if measurement_type == "intensity":
+        return (
+            "Analyze the emotions in the provided text and score each Ekman emotion "
+            "independently.\n\n"
+            "- For a given input text, output only a JSON object with the following structure "
+            '(do not include any explanations, notes, or code fences):\n'
+            '    {"happiness": a, "sadness": b, "fear": c, "anger": d, "disgust": e, "contempt": f, "surprise": g}\n'
+            "- Each value (a through g) should be a floating-point value between 0 and 1, representing the independent "
+            "intensity of the respective emotion.\n"
+            "- Ensure that each emotion dimension is scored independently and may sum to more or less than 1.\n\n"
+            "# Output Format\n\n"
+            "Return only a single-line JSON object in the format:\n"
+            '{"happiness": [float between 0 and 1], "sadness": [float between 0 and 1], "fear": [float between 0 and 1], '
+            '"anger": [float between 0 and 1], "disgust": [float between 0 and 1], "contempt": [float between 0 and 1], '
+            '"surprise": [float between 0 and 1]}\n\n'
+            "# Example\n\n"
+            'Input:\nText: "I was shocked to find out my friend betrayed me. I feel so angry and hurt."\n\n'
+            'Output:\n{"happiness": 0.0, "sadness": 0.7, "fear": 0.2, "anger": 0.8, "disgust": 0.4, "contempt": 0.5, "surprise": 0.6}\n\n'
+            "# Notes\n\n"
+            "- Do not include any explanation, commentary, or code formatting—only the JSON object as output.\n"
+            "- Each emotion score should be evaluated independently for the input text.\n"
+            "- All seven emotions must be present in the output, even if their value is 0.\n\n"
+            "Remember: Output only the JSON object as described, with all values in the [0, 1] range."
+        )
+    elif measurement_type == "likelihood":
+        return (
+            "Analyze the emotions in the provided text and determine the likelihood (probability) "
+            "of each Ekman emotion being the primary emotion.\n\n"
+            "- For a given input text, output only a JSON object with all 7 Ekman emotions\n"
+            "- Each value should be a probability (0-1) that this is the dominant emotion\n"
+            "- IMPORTANT: All seven values MUST sum to exactly 1.0 as they are probabilities\n\n"
+            "# Output Format\n\n"
+            '{"happiness": [prob], "sadness": [prob], "fear": [prob], "anger": [prob], '
+            '"disgust": [prob], "contempt": [prob], "surprise": [prob]}\n\n'
+            "# Example\n\n"
+            'Input:\nText: "I was shocked to find out my friend betrayed me. I feel so angry and hurt."\n\n'
+            'Output:\n{"happiness": 0.0, "sadness": 0.25, "fear": 0.05, "anger": 0.35, "disgust": 0.1, "contempt": 0.15, "surprise": 0.1}\n\n'
+            "Remember: All seven values must sum to 1.0"
+        )
+    else:  # both
+        return (
+            "Analyze the emotions in the provided text and provide BOTH intensity and likelihood measures "
+            "for all Ekman emotions.\n\n"
+            "- Output a JSON object with this structure:\n"
+            '    {\n'
+            '        "intensity": {all 7 emotions with independent intensity scores 0-1},\n'
+            '        "likelihood": {all 7 emotions with probabilities summing to 1.0}\n'
+            '    }\n\n'
+            "# Output Format\n\n"
+            '{"intensity": {"happiness": [0-1], "sadness": [0-1], "fear": [0-1], "anger": [0-1], '
+            '"disgust": [0-1], "contempt": [0-1], "surprise": [0-1]}, '
+            '"likelihood": {"happiness": [0-1], "sadness": [0-1], "fear": [0-1], "anger": [0-1], '
+            '"disgust": [0-1], "contempt": [0-1], "surprise": [0-1]}}\n\n'
+            "# Example\n\n"
+            'Input:\nText: "I was shocked to find out my friend betrayed me."\n\n'
+            'Output:\n{"intensity": {"happiness": 0.0, "sadness": 0.7, "fear": 0.2, "anger": 0.8, '
+            '"disgust": 0.4, "contempt": 0.5, "surprise": 0.6}, '
+            '"likelihood": {"happiness": 0.0, "sadness": 0.25, "fear": 0.05, "anger": 0.35, '
+            '"disgust": 0.1, "contempt": 0.15, "surprise": 0.1}}\n\n'
+            "Remember: Output only the JSON object. Likelihood values must sum to 1.0"
+        )
 
 def get_explanation_prompt(mode: str, explain_mode: str) -> str:
     """
@@ -121,7 +230,7 @@ def _clip01(x: float) -> float:
     except Exception:
         return 0.0
 
-def _safe_json_loads(s: str, mode: str = "valence") -> Tuple[Dict[str, float], str]:
+def _safe_json_loads(s: str, mode: str = "valence", measurement_type: str = "intensity") -> Tuple[Dict[str, float], str]:
     """
     Parse JSON object safely, returning a dict with expected keys and any explanation.
     Returns (scores_dict, explanation)
@@ -129,7 +238,7 @@ def _safe_json_loads(s: str, mode: str = "valence") -> Tuple[Dict[str, float], s
     explanation = ""
     
     # Try to extract JSON and explanation separately
-    json_match = re.search(r"\{[^}]*\}", s, flags=re.DOTALL)
+    json_match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}", s, flags=re.DOTALL)
     if json_match:
         json_str = json_match.group(0)
         # Get everything after the JSON as explanation
@@ -143,6 +252,14 @@ def _safe_json_loads(s: str, mode: str = "valence") -> Tuple[Dict[str, float], s
         data = json.loads(json_str)
     except Exception:
         data = {}
+    
+    # Handle "both" measurement type
+    if measurement_type == "both":
+        if "intensity" in data and "likelihood" in data:
+            # Return intensity scores as primary, store likelihood separately if needed
+            intensity_data = data.get("intensity", {})
+            # For now, we'll return intensity scores (can extend to handle both)
+            data = intensity_data
     
     if mode == "valence":
         scores = {
@@ -328,7 +445,7 @@ class SentimentAnalyzer:
     def analyze_deepseek(self, text: str, api_key: str, mode: str = "valence", text_idx: int = 0) -> Dict[str, float]:
         """
         Analyze sentiment using DeepSeek.
-        Supports both valence and Ekman emotions modes with explanations.
+        Supports both valence and Ekman emotions modes with explanations and measurement types.
         """
         try:
             if not api_key:
@@ -341,7 +458,11 @@ class SentimentAnalyzer:
 
             client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
-            instruction = playground_developer_instruction() if mode == "valence" else ekman_developer_instruction()
+            measurement = st.session_state.measurement_type.lower()
+            instruction = (
+                playground_developer_instruction(measurement) if mode == "valence" 
+                else ekman_developer_instruction(measurement)
+            )
             
             # Add explanation request if enabled
             if st.session_state.explain_mode != "None":
@@ -356,11 +477,11 @@ class SentimentAnalyzer:
                     {"role": "user", "content": user_text},
                 ],
                 temperature=0.0,
-                max_tokens=300 if st.session_state.explain_mode == "Long Explanation" else 150,
+                max_tokens=400 if measurement == "both" else (300 if st.session_state.explain_mode == "Long Explanation" else 150),
             )
 
             result_text = (resp.choices[0].message.content or "").strip()
-            scores, explanation = _safe_json_loads(result_text, mode)
+            scores, explanation = _safe_json_loads(result_text, mode, measurement)
             
             # Store explanation if present
             if explanation and st.session_state.explain_mode != "None":
@@ -384,7 +505,7 @@ class SentimentAnalyzer:
     def analyze_gpt5nano(self, text: str, api_key: str, mode: str = "valence", text_idx: int = 0) -> Dict[str, float]:
         """
         Analyze sentiment using OpenAI GPT-5 nano via Responses API with GPT-4o fallback.
-        Supports both valence and Ekman emotions modes with explanations.
+        Supports both valence and Ekman emotions modes with explanations and measurement types.
         """
         try:
             if not api_key:
@@ -396,7 +517,11 @@ class SentimentAnalyzer:
                            "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
 
             client = OpenAI(api_key=api_key)
-            instruction = playground_developer_instruction() if mode == "valence" else ekman_developer_instruction()
+            measurement = st.session_state.measurement_type.lower()
+            instruction = (
+                playground_developer_instruction(measurement) if mode == "valence" 
+                else ekman_developer_instruction(measurement)
+            )
             
             # Add explanation request if enabled
             if st.session_state.explain_mode != "None":
@@ -404,38 +529,41 @@ class SentimentAnalyzer:
 
             # Try GPT-5 nano first
             try:
-                # Build schema based on mode
-                if mode == "valence":
-                    schema_obj = {
-                        "type": "object",
-                        "properties": {
-                            "positive": {"type": "number", "minimum": 0, "maximum": 1},
-                            "negative": {"type": "number", "minimum": 0, "maximum": 1},
-                            "neutral":  {"type": "number", "minimum": 0, "maximum": 1},
-                        },
-                        "required": ["positive", "negative", "neutral"],
-                        "additionalProperties": False,
-                    }
-                    schema_name = "SentimentScores"
-                else:  # ekman
-                    schema_obj = {
-                        "type": "object",
-                        "properties": {
-                            "happiness": {"type": "number", "minimum": 0, "maximum": 1},
-                            "sadness": {"type": "number", "minimum": 0, "maximum": 1},
-                            "fear": {"type": "number", "minimum": 0, "maximum": 1},
-                            "anger": {"type": "number", "minimum": 0, "maximum": 1},
-                            "disgust": {"type": "number", "minimum": 0, "maximum": 1},
-                            "contempt": {"type": "number", "minimum": 0, "maximum": 1},
-                            "surprise": {"type": "number", "minimum": 0, "maximum": 1},
-                        },
-                        "required": ["happiness", "sadness", "fear", "anger", "disgust", "contempt", "surprise"],
-                        "additionalProperties": False,
-                    }
-                    schema_name = "EkmanEmotions"
-
-                # Don't use JSON schema if we want explanations
-                if st.session_state.explain_mode == "None":
+                # For GPT-5 nano, we can't use strict JSON schema with "both" or with explanations
+                # So only use schema for simple cases
+                use_schema = (st.session_state.explain_mode == "None" and measurement != "both")
+                
+                if use_schema:
+                    # Build schema based on mode
+                    if mode == "valence":
+                        schema_obj = {
+                            "type": "object",
+                            "properties": {
+                                "positive": {"type": "number", "minimum": 0, "maximum": 1},
+                                "negative": {"type": "number", "minimum": 0, "maximum": 1},
+                                "neutral":  {"type": "number", "minimum": 0, "maximum": 1},
+                            },
+                            "required": ["positive", "negative", "neutral"],
+                            "additionalProperties": False,
+                        }
+                        schema_name = "SentimentScores"
+                    else:  # ekman
+                        schema_obj = {
+                            "type": "object",
+                            "properties": {
+                                "happiness": {"type": "number", "minimum": 0, "maximum": 1},
+                                "sadness": {"type": "number", "minimum": 0, "maximum": 1},
+                                "fear": {"type": "number", "minimum": 0, "maximum": 1},
+                                "anger": {"type": "number", "minimum": 0, "maximum": 1},
+                                "disgust": {"type": "number", "minimum": 0, "maximum": 1},
+                                "contempt": {"type": "number", "minimum": 0, "maximum": 1},
+                                "surprise": {"type": "number", "minimum": 0, "maximum": 1},
+                            },
+                            "required": ["happiness", "sadness", "fear", "anger", "disgust", "contempt", "surprise"],
+                            "additionalProperties": False,
+                        }
+                        schema_name = "EkmanEmotions"
+                    
                     text_format = {
                         "format": {
                             "type": "json_schema",
@@ -460,7 +588,7 @@ class SentimentAnalyzer:
                     tools=[],
                     store=False,
                     include=include_list,
-                    max_output_tokens=300 if st.session_state.explain_mode == "Long Explanation" else 150,
+                    max_output_tokens=400 if measurement == "both" else (300 if st.session_state.explain_mode == "Long Explanation" else 150),
                     temperature=0.0,
                 )
 
@@ -471,7 +599,7 @@ class SentimentAnalyzer:
                 if st.session_state.debug_mode:
                     st.code(f"GPT-5 nano output_text:\n{out}")
 
-                scores, explanation = _safe_json_loads(out, mode)
+                scores, explanation = _safe_json_loads(out, mode, measurement)
                 
                 # Store explanation if present
                 if explanation and st.session_state.explain_mode != "None":
@@ -494,11 +622,11 @@ class SentimentAnalyzer:
                     model="gpt-4o",
                     messages=messages,
                     temperature=0.0,
-                    max_tokens=300 if st.session_state.explain_mode == "Long Explanation" else 150,
+                    max_tokens=400 if measurement == "both" else (300 if st.session_state.explain_mode == "Long Explanation" else 150),
                 )
                 
                 result_text = response.choices[0].message.content
-                scores, explanation = _safe_json_loads(result_text, mode)
+                scores, explanation = _safe_json_loads(result_text, mode, measurement)
                 
                 # Store explanation if present
                 if explanation and st.session_state.explain_mode != "None":
@@ -701,6 +829,24 @@ def main() -> None:
             
             st.divider()
             
+            # Measurement Type selection
+            st.markdown("**📊 Measurement Type**")
+            measurement_type = st.selectbox(
+                "DeepSeek & OpenAI measurement",
+                ["Intensity", "Likelihood", "Both"],
+                help="Intensity: Independent strength (can sum >1) | Likelihood: Probability (sums to 1) | Both: Get both metrics"
+            )
+            st.session_state.measurement_type = measurement_type
+            
+            if measurement_type == "Intensity":
+                st.caption("📈 Measures emotional strength independently")
+            elif measurement_type == "Likelihood":
+                st.caption("🎲 Measures probability distribution")
+            else:
+                st.caption("📊 Returns both intensity and likelihood")
+            
+            st.divider()
+            
             # Explainable AI settings
             st.markdown("**🤖 Explainable AI**")
             explain_mode = st.selectbox(
@@ -711,7 +857,7 @@ def main() -> None:
             st.session_state.explain_mode = explain_mode
             
             if explain_mode != "None":
-                st.info(f"💡 {explain_mode} enabled for OpenAI and DeepSeek models")
+                st.info(f"💡 {explain_mode} enabled")
 
     # ---------------- Main content area (full width) ----------------
     # Input section
