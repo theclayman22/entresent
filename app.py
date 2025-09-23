@@ -34,8 +34,6 @@ Supports both valence analysis and Ekman emotions.
 Run with:  streamlit run app.py
 """
 
-from __future__ import annotations
-
 import json
 import re
 from io import BytesIO
