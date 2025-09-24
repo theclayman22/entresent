@@ -572,8 +572,7 @@ class SentimentAnalyzer:
                 if explanation and st.session_state.explain_mode != "None":
                     if "GPT-5 nano" not in st.session_state.explanations:
                         st.session_state.explanations["GPT-5 nano"] = {}
-                    st.session_state.explan
-                        st.session_state.explanations["GPT-5 nano"][text_idx] = explanation
+                    st.session_state.explanations["GPT-5 nano"][text_idx] = explanation
                 
                 return scores
 
