@@ -692,7 +692,7 @@ def create_results_dataframe(texts: List[str], results: Dict, truncate: bool = T
 # --- App -----------------------------------------------------------------------
 def main() -> None:
     # Header
-    st.title("🎭 Entresent 😊")
+    st.title("🎭 Entresent - Sentiment Analysis Toolbox")
     st.markdown("*Advanced sentiment and emotion analysis using state-of-the-art AI models. Analyze text to understand emotional valence (positive/negative/neutral) or detect specific emotions using Ekman's framework.*")
     
     # ---------------- Sidebar: Config (reordered) ----------------
