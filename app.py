@@ -1,33 +1,4 @@
-def analyze_gpt5nano(self, text: str, api_key: str, mode: str = "valence", text_idx: int = 0) -> Dict[str, float]:
-        """
-        Analyze sentiment using OpenAI GPT-5 nano via Responses API with GPT-4o fallback.
-        Supports both valence and Ekman emotions modes with explanations and measurement types.
-        """
-        try:
-            if not api_key:
-                st.error("OpenAI API key required for GPT-5 nano")
-                if mode == "valence":
-                    return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
-                else:
-                    return {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
-                           "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
-
-            client = OpenAI(api_key=api_key)
-            measurement = st.session_state.measurement_type.lower()
-            instruction = (
-                playground_developer_instruction(measurement) if mode == "valence" 
-                else ekman_developer_instruction(measurement)
-            )
-            
-            # Add explanation request if enabled
-            if st.session_state.explain_mode != "None":
-                instruction += get_explanation_prompt(mode, st.session_state.explain_mode)
-
-            # Try GPT-5 nano first
-            try:
-                # Build schema based on mode and measurement type
-                if measurement != "both":
-                    if mode == "valence":"""
+"""
 Sentiment Analysis Toolbox - Entresent
 A comprehensive tool for analyzing text sentiment using multiple models.
 Supports both valence analysis and Ekman emotions.
@@ -139,8 +110,6 @@ def ekman_developer_instruction(measurement_type: str = "intensity") -> str:
     Instruction for Ekman emotions analysis.
     Supports intensity, likelihood, or both measurements.
     """
-    emotions = ["happiness", "sadness", "fear", "anger", "disgust", "contempt", "surprise"]
-    
     if measurement_type == "intensity":
         return (
             "Analyze the emotions in the provided text and score each Ekman emotion "
@@ -308,7 +277,7 @@ class SentimentAnalyzer:
 
     def __init__(self) -> None:
         self.models_initialized: Dict[str, bool] = {}
-        self.vader: SentimentIntensityAnalyzer | None = None
+        self.vader = None
         self.setup_models()
 
     # ---------------- Local (no API) ----------------
@@ -603,7 +572,8 @@ class SentimentAnalyzer:
                 if explanation and st.session_state.explain_mode != "None":
                     if "GPT-5 nano" not in st.session_state.explanations:
                         st.session_state.explanations["GPT-5 nano"] = {}
-                    st.session_state.explanations["GPT-5 nano"][text_idx] = explanation
+                    st.session_state.explan
+                        st.session_state.explanations["GPT-5 nano"][text_idx] = explanation
                 
                 return scores
 
