@@ -35,6 +35,8 @@ if "explanations" not in st.session_state:
     st.session_state.explanations = {}
 if "measurement_type" not in st.session_state:
     st.session_state.measurement_type = "Intensity"
+if "measurement_scale" not in st.session_state:
+    st.session_state.measurement_scale = "Continuous (0-1)"
 
 # --- Shared instructions -------------------------------------------------------
 def playground_developer_instruction(measurement_type: str = "intensity") -> str:
@@ -196,6 +198,44 @@ def _clip01(x: float) -> float:
         return float(max(0.0, min(1.0, x)))
     except Exception:
         return 0.0
+
+
+LIKERT_LABELS = {
+    1: "Not at all",
+    2: "Slightly",
+    3: "Moderately",
+    4: "Strongly",
+    5: "Extremely",
+}
+
+
+def _to_likert(value: float) -> int:
+    """Convert a 0-1 score into a 1-5 Likert scale value."""
+    try:
+        numeric = float(value)
+    except Exception:
+        return 1
+
+    scaled = np.floor(numeric * 5.0) + 1
+    return int(np.clip(scaled, 1, 5))
+
+
+def _apply_measurement_scale(scores: Dict[str, float], scale: str) -> Dict[str, float]:
+    """Apply the configured measurement scale to DeepSeek/OpenAI scores."""
+
+    if not isinstance(scores, dict) or scale != "Likert (1-5)":
+        return scores
+
+    scaled_scores: Dict[str, float] = {}
+    for key, value in scores.items():
+        if isinstance(value, dict):
+            scaled_scores[key] = _apply_measurement_scale(value, scale)
+        elif isinstance(value, (int, float, np.integer, np.floating)):
+            scaled_scores[key] = _to_likert(float(value))
+        else:
+            scaled_scores[key] = value
+
+    return scaled_scores
 
 def _safe_json_loads(s: str, mode: str = "valence", measurement_type: str = "intensity") -> Tuple[Dict[str, float], str]:
     """
@@ -418,10 +458,18 @@ class SentimentAnalyzer:
             if not api_key:
                 st.error("DeepSeek API key required for DeepSeek")
                 if mode == "valence":
-                    return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
+                    missing_key_scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
                 else:
-                    return {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
-                           "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
+                    missing_key_scores = {
+                        "happiness": 0.0,
+                        "sadness": 0.0,
+                        "fear": 0.0,
+                        "anger": 0.0,
+                        "disgust": 0.0,
+                        "contempt": 0.0,
+                        "surprise": 0.0,
+                    }
+                return _apply_measurement_scale(missing_key_scores, st.session_state.measurement_scale)
 
             client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
@@ -449,6 +497,7 @@ class SentimentAnalyzer:
 
             result_text = (resp.choices[0].message.content or "").strip()
             scores, explanation = _safe_json_loads(result_text, mode, measurement)
+            scores = _apply_measurement_scale(scores, st.session_state.measurement_scale)
             
             # Store explanation if present
             if explanation and st.session_state.explain_mode != "None":
@@ -463,10 +512,18 @@ class SentimentAnalyzer:
             if st.session_state.debug_mode:
                 st.exception(e)
             if mode == "valence":
-                return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
+                fallback_scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
             else:
-                return {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
-                       "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
+                fallback_scores = {
+                    "happiness": 0.0,
+                    "sadness": 0.0,
+                    "fear": 0.0,
+                    "anger": 0.0,
+                    "disgust": 0.0,
+                    "contempt": 0.0,
+                    "surprise": 0.0,
+                }
+            return _apply_measurement_scale(fallback_scores, st.session_state.measurement_scale)
 
     # ---------------- OpenAI (GPT-5 nano via Responses API with GPT-4o fallback) --------------------
     def analyze_gpt5nano(self, text: str, api_key: str, mode: str = "valence", text_idx: int = 0) -> Dict[str, float]:
@@ -478,10 +535,18 @@ class SentimentAnalyzer:
             if not api_key:
                 st.error("OpenAI API key required for GPT-5 nano")
                 if mode == "valence":
-                    return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
+                    missing_key_scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
                 else:
-                    return {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
-                           "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
+                    missing_key_scores = {
+                        "happiness": 0.0,
+                        "sadness": 0.0,
+                        "fear": 0.0,
+                        "anger": 0.0,
+                        "disgust": 0.0,
+                        "contempt": 0.0,
+                        "surprise": 0.0,
+                    }
+                return _apply_measurement_scale(missing_key_scores, st.session_state.measurement_scale)
 
             client = OpenAI(api_key=api_key)
             measurement = st.session_state.measurement_type.lower()
@@ -567,6 +632,7 @@ class SentimentAnalyzer:
                     st.code(f"GPT-5 nano output_text:\n{out}")
 
                 scores, explanation = _safe_json_loads(out, mode, measurement)
+                scores = _apply_measurement_scale(scores, st.session_state.measurement_scale)
                 
                 # Store explanation if present
                 if explanation and st.session_state.explain_mode != "None":
@@ -594,6 +660,7 @@ class SentimentAnalyzer:
                 
                 result_text = response.choices[0].message.content
                 scores, explanation = _safe_json_loads(result_text, mode, measurement)
+                scores = _apply_measurement_scale(scores, st.session_state.measurement_scale)
                 
                 # Store explanation if present
                 if explanation and st.session_state.explain_mode != "None":
@@ -608,10 +675,18 @@ class SentimentAnalyzer:
             if st.session_state.debug_mode:
                 st.exception(e)
             if mode == "valence":
-                return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
+                fallback_scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
             else:
-                return {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
-                       "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
+                fallback_scores = {
+                    "happiness": 0.0,
+                    "sadness": 0.0,
+                    "fear": 0.0,
+                    "anger": 0.0,
+                    "disgust": 0.0,
+                    "contempt": 0.0,
+                    "surprise": 0.0,
+                }
+            return _apply_measurement_scale(fallback_scores, st.session_state.measurement_scale)
 
     # ---------------- Dispatcher ----------------
     def analyze_text(self, text: str, model: str, api_keys: Dict[str, str], mode: str = "valence", text_idx: int = 0) -> Dict[str, float]:
@@ -672,7 +747,17 @@ def create_results_dataframe(texts: List[str], results: Dict, truncate: bool = T
             if i < len(scores_list):
                 for sentiment, value in scores_list[i].items():
                     if sentiment != "compound":  # Skip compound for cleaner display
-                        row[f"{model}_{sentiment}"] = round(float(value), 3)
+                        if isinstance(value, (int, float, np.integer, np.floating)):
+                            if (
+                                st.session_state.measurement_scale == "Likert (1-5)"
+                                and isinstance(value, (int, np.integer))
+                                and int(value) in LIKERT_LABELS
+                            ):
+                                row[f"{model}_{sentiment}"] = int(value)
+                            else:
+                                row[f"{model}_{sentiment}"] = round(float(value), 3)
+                        else:
+                            row[f"{model}_{sentiment}"] = value
         
         # Add explanations if available
         if include_explanations and st.session_state.explanations:
@@ -811,9 +896,26 @@ def main() -> None:
                 st.caption("🎲 Measures probability distribution")
             else:
                 st.caption("📊 Returns both intensity and likelihood")
-            
+
             st.divider()
-            
+
+            # Measurement scaling selection
+            st.markdown("**📐 Output Scaling**")
+            measurement_scale = st.selectbox(
+                "Scaling for DeepSeek & OpenAI outputs",
+                ["Continuous (0-1)", "Likert (1-5)"],
+                help="Choose how DeepSeek and OpenAI scores should be displayed",
+            )
+            st.session_state.measurement_scale = measurement_scale
+
+            if measurement_scale == "Continuous (0-1)":
+                st.caption("🔁 Raw scores between 0 and 1")
+            else:
+                likert_description = " | ".join(f"{value} - {label}" for value, label in LIKERT_LABELS.items())
+                st.caption(f"🪄 Likert scale: {likert_description}")
+
+            st.divider()
+
             # Explainable AI settings
             st.markdown("**🤖 Explainable AI**")
             explain_mode = st.selectbox(
@@ -958,6 +1060,10 @@ def main() -> None:
             st.dataframe(styled, width="stretch")
         else:
             st.dataframe(df_results, width="stretch")
+
+        if st.session_state.measurement_scale == "Likert (1-5)":
+            legend = ", ".join(f"{value} - {label}" for value, label in LIKERT_LABELS.items())
+            st.caption(f"Likert legend: {legend}")
 
         # Downloads
         if download_format == "CSV":
