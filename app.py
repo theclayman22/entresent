@@ -5,14 +5,10 @@ Supports both valence analysis and Ekman emotions.
 Run with:  streamlit run app.py
 """
 
-import copy
 import json
 import re
-import hashlib
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -213,28 +209,6 @@ LIKERT_LABELS = {
 }
 
 
-HF_MAX_INPUT_CHARS = 512
-LLM_MAX_INPUT_CHARS = 1200
-
-
-def _normalize_text(text: str) -> str:
-    """Collapse whitespace so prompts stay compact."""
-    return re.sub(r"\s+", " ", text or "").strip()
-
-
-def _truncate_text(text: str, max_chars: int) -> str:
-    """Normalize and truncate text to the configured character budget."""
-    normalized = _normalize_text(text)
-    if len(normalized) <= max_chars:
-        return normalized
-    return normalized[:max_chars]
-
-
-def _hash_text(text: str) -> str:
-    """Hash normalized text for use in cache keys."""
-    return hashlib.sha256(_normalize_text(text).encode("utf-8")).hexdigest()
-
-
 def _to_likert(value: float) -> int:
     """Convert a 0-1 score into a 1-5 Likert scale value."""
     try:
@@ -344,11 +318,6 @@ class SentimentAnalyzer:
     def __init__(self) -> None:
         self.models_initialized: Dict[str, bool] = {}
         self.vader = None
-        self._result_cache: Dict[Tuple, Tuple[Dict[str, float], Optional[Tuple[str, Optional[str]]]]] = {}
-        self._cache_lock = threading.Lock()
-        self._explanation_lock = threading.Lock()
-        self.http_session = requests.Session()
-        self.http_session.headers.update({"User-Agent": "Entresent/1.0"})
         self.setup_models()
 
     # ---------------- Local (no API) ----------------
@@ -360,52 +329,6 @@ class SentimentAnalyzer:
         except Exception as e:
             st.warning(f"VADER initialization failed: {e}")
             self.models_initialized["VADER"] = False
-
-    def _build_cache_key(
-        self,
-        provider: str,
-        text: str,
-        mode: str,
-        measurement: str,
-        explain_mode: str,
-        extra: Optional[Tuple] = None,
-    ) -> Tuple:
-        key: Tuple = (
-            provider,
-            _hash_text(text),
-            mode,
-            measurement,
-            explain_mode,
-        )
-        if extra:
-            key += tuple(extra)
-        return key
-
-    def _get_cached_result(
-        self, key: Tuple
-    ) -> Optional[Tuple[Dict[str, float], Optional[Tuple[str, Optional[str]]]]]:
-        with self._cache_lock:
-            cached = self._result_cache.get(key)
-        if not cached:
-            return None
-        scores, explanation = cached
-        return copy.deepcopy(scores), explanation
-
-    def _set_cached_result(
-        self,
-        key: Tuple,
-        scores: Dict[str, float],
-        explanation: Optional[Tuple[str, Optional[str]]],
-    ) -> None:
-        with self._cache_lock:
-            self._result_cache[key] = (copy.deepcopy(scores), explanation)
-
-    def _store_explanation(self, provider: str, text_idx: int, explanation: Optional[str]) -> None:
-        if not explanation or st.session_state.explain_mode == "None":
-            return
-        with self._explanation_lock:
-            provider_map = st.session_state.explanations.setdefault(provider, {})
-            provider_map[text_idx] = explanation
 
     def analyze_vader(self, text: str) -> Dict[str, float]:
         """Analyze sentiment using VADER (valence only)."""
@@ -430,24 +353,9 @@ class SentimentAnalyzer:
                 st.error("Hugging Face API key required for SiEBERT")
                 return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
 
-            explain_mode = st.session_state.get("explain_mode", "None")
-            trimmed_text = _truncate_text(text, HF_MAX_INPUT_CHARS)
-            cache_key = self._build_cache_key(
-                "hf_siebert", trimmed_text, "valence", "intensity", explain_mode, extra=("siebert",)
-            )
-            cached = self._get_cached_result(cache_key)
-            if cached:
-                scores, _ = cached
-                return scores
-
             api_url = "https://api-inference.huggingface.co/models/siebert/sentiment-roberta-large-english"
             headers = {"Authorization": f"Bearer {api_key}"}
-            response = self.http_session.post(
-                api_url,
-                headers=headers,
-                json={"inputs": trimmed_text},
-                timeout=30,
-            )
+            response = requests.post(api_url, headers=headers, json={"inputs": text[:512]}, timeout=60)
 
             if response.status_code == 503:
                 st.warning("SiEBERT model is loading on HF. Try again in a few seconds.")
@@ -469,16 +377,10 @@ class SentimentAnalyzer:
             score = _clip01(float(result_item.get("score", 0.5)))
 
             if "positive" in label:
-                scores = {"positive": score, "negative": _clip01(1 - score), "neutral": 0.0}
-                self._set_cached_result(cache_key, scores, None)
-                return scores
+                return {"positive": score, "negative": _clip01(1 - score), "neutral": 0.0}
             if "negative" in label:
-                scores = {"negative": score, "positive": _clip01(1 - score), "neutral": 0.0}
-                self._set_cached_result(cache_key, scores, None)
-                return scores
-            scores = {"positive": 0.33, "negative": 0.33, "neutral": 0.34}
-            self._set_cached_result(cache_key, scores, None)
-            return scores
+                return {"negative": score, "positive": _clip01(1 - score), "neutral": 0.0}
+            return {"positive": 0.33, "negative": 0.33, "neutral": 0.34}
 
         except Exception as e:
             st.error(f"SiEBERT analysis failed: {e}")
@@ -497,37 +399,22 @@ class SentimentAnalyzer:
                 if mode == "valence":
                     return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
                 else:
-                    return {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0,
+                    return {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
                            "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
-
-            explain_mode = st.session_state.get("explain_mode", "None")
-            trimmed_text = _truncate_text(text, HF_MAX_INPUT_CHARS)
-            cache_key = self._build_cache_key(
-                "hf_bart", trimmed_text, mode, "intensity", explain_mode, extra=("bart", mode)
-            )
-            cached = self._get_cached_result(cache_key)
-            if cached:
-                scores, _ = cached
-                return scores
 
             api_url = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
             headers = {"Authorization": f"Bearer {api_key}"}
-
+            
             if mode == "valence":
                 labels = ["positive", "negative", "neutral"]
             else:  # ekman
                 labels = ["happiness", "sadness", "fear", "anger", "disgust", "contempt", "surprise"]
             
             payload = {
-                "inputs": trimmed_text,
+                "inputs": text[:512],
                 "parameters": {"candidate_labels": labels, "multi_label": True},
             }
-            response = self.http_session.post(
-                api_url,
-                headers=headers,
-                json=payload,
-                timeout=30,
-            )
+            response = requests.post(api_url, headers=headers, json=payload, timeout=60)
 
             if response.status_code == 503:
                 st.warning("BART model is loading on HF. Try again shortly.")
@@ -548,8 +435,7 @@ class SentimentAnalyzer:
                 for label, score in zip(blob["labels"], blob["scores"]):
                     if label in scores_map:
                         scores_map[label] = _clip01(float(score))
-
-            self._set_cached_result(cache_key, scores_map, None)
+            
             return scores_map
 
         except Exception as e:
@@ -588,28 +474,16 @@ class SentimentAnalyzer:
             client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
             measurement = st.session_state.measurement_type.lower()
-            explain_mode = st.session_state.get("explain_mode", "None")
-            trimmed_text = _truncate_text(text, LLM_MAX_INPUT_CHARS)
-            cache_key = self._build_cache_key("deepseek", trimmed_text, mode, measurement, explain_mode)
-            cached = self._get_cached_result(cache_key)
-            if cached:
-                cached_scores, cached_explanation = cached
-                scaled_scores = _apply_measurement_scale(cached_scores, st.session_state.measurement_scale)
-                if cached_explanation:
-                    provider_label, explanation_text = cached_explanation
-                    self._store_explanation(provider_label or "DeepSeek", text_idx, explanation_text)
-                return scaled_scores
-
             instruction = (
-                playground_developer_instruction(measurement) if mode == "valence"
+                playground_developer_instruction(measurement) if mode == "valence" 
                 else ekman_developer_instruction(measurement)
             )
-
+            
             # Add explanation request if enabled
             if st.session_state.explain_mode != "None":
                 instruction += get_explanation_prompt(mode, st.session_state.explain_mode)
-
-            user_text = f"Text: {trimmed_text}"
+            
+            user_text = f"Text: {text[:1000]}"
 
             resp = client.chat.completions.create(
                 model="deepseek-chat",
@@ -623,16 +497,15 @@ class SentimentAnalyzer:
 
             result_text = (resp.choices[0].message.content or "").strip()
             scores, explanation = _safe_json_loads(result_text, mode, measurement)
-            base_scores = copy.deepcopy(scores)
-            scaled_scores = _apply_measurement_scale(scores, st.session_state.measurement_scale)
-
-            explanation_payload = ("DeepSeek", explanation) if explanation else None
-            self._set_cached_result(cache_key, base_scores, explanation_payload)
-            if explanation_payload:
-                self._store_explanation(explanation_payload[0], text_idx, explanation_payload[1])
-
+            scores = _apply_measurement_scale(scores, st.session_state.measurement_scale)
+            
             # Store explanation if present
-            return scaled_scores
+            if explanation and st.session_state.explain_mode != "None":
+                if "DeepSeek" not in st.session_state.explanations:
+                    st.session_state.explanations["DeepSeek"] = {}
+                st.session_state.explanations["DeepSeek"][text_idx] = explanation
+            
+            return scores
 
         except Exception as e:
             st.error(f"DeepSeek analysis failed: {e}")
@@ -677,23 +550,11 @@ class SentimentAnalyzer:
 
             client = OpenAI(api_key=api_key)
             measurement = st.session_state.measurement_type.lower()
-            explain_mode = st.session_state.get("explain_mode", "None")
-            trimmed_text = _truncate_text(text, LLM_MAX_INPUT_CHARS)
-            cache_key = self._build_cache_key("openai", trimmed_text, mode, measurement, explain_mode)
-            cached = self._get_cached_result(cache_key)
-            if cached:
-                cached_scores, cached_explanation = cached
-                scaled_scores = _apply_measurement_scale(cached_scores, st.session_state.measurement_scale)
-                if cached_explanation:
-                    provider_label, explanation_text = cached_explanation
-                    self._store_explanation(provider_label or "GPT-5 nano", text_idx, explanation_text)
-                return scaled_scores
-
             instruction = (
-                playground_developer_instruction(measurement) if mode == "valence"
+                playground_developer_instruction(measurement) if mode == "valence" 
                 else ekman_developer_instruction(measurement)
             )
-
+            
             # Add explanation request if enabled
             if st.session_state.explain_mode != "None":
                 instruction += get_explanation_prompt(mode, st.session_state.explain_mode)
@@ -752,7 +613,7 @@ class SentimentAnalyzer:
                     model="gpt-5-nano",
                     input=[
                         {"role": "developer", "content": [{"type": "input_text", "text": instruction}]},
-                        {"role": "user", "content": [{"type": "input_text", "text": f"Text: {trimmed_text}"}]},
+                        {"role": "user", "content": [{"type": "input_text", "text": f"Text: {text[:1000]}"}]},
                     ],
                     text=text_format,
                     reasoning={"effort": "low"},
@@ -771,45 +632,43 @@ class SentimentAnalyzer:
                     st.code(f"GPT-5 nano output_text:\n{out}")
 
                 scores, explanation = _safe_json_loads(out, mode, measurement)
-                base_scores = copy.deepcopy(scores)
-                scaled_scores = _apply_measurement_scale(scores, st.session_state.measurement_scale)
-
-                explanation_payload = ("GPT-5 nano", explanation) if explanation else None
-                self._set_cached_result(cache_key, base_scores, explanation_payload)
-                if explanation_payload:
-                    self._store_explanation(explanation_payload[0], text_idx, explanation_payload[1])
-
-                return scaled_scores
+                scores = _apply_measurement_scale(scores, st.session_state.measurement_scale)
+                
+                # Store explanation if present
+                if explanation and st.session_state.explain_mode != "None":
+                    if "GPT-5 nano" not in st.session_state.explanations:
+                        st.session_state.explanations["GPT-5 nano"] = {}
+                    st.session_state.explanations["GPT-5 nano"][text_idx] = explanation
+                
+                return scores
 
             except Exception as nano_error:
                 # Fallback to GPT-4o
                 st.info("📋 GPT-5 nano unavailable, using GPT-4o fallback...")
-                if st.session_state.debug_mode:
-                    st.warning(f"GPT-5 nano error: {nano_error}")
-
+                
                 messages = [
                     {"role": "system", "content": instruction},
-                    {"role": "user", "content": f"Text: {trimmed_text}"}
+                    {"role": "user", "content": f"Text: {text[:1000]}"}
                 ]
-
+                
                 response = client.chat.completions.create(
                     model="gpt-4o",
                     messages=messages,
                     temperature=0.0,
                     max_tokens=400 if measurement == "both" else (300 if st.session_state.explain_mode == "Long Explanation" else 150),
                 )
-
+                
                 result_text = response.choices[0].message.content
                 scores, explanation = _safe_json_loads(result_text, mode, measurement)
-                base_scores = copy.deepcopy(scores)
-                scaled_scores = _apply_measurement_scale(scores, st.session_state.measurement_scale)
-
-                explanation_payload = ("GPT-4o (fallback)", explanation) if explanation else None
-                self._set_cached_result(cache_key, base_scores, explanation_payload)
-                if explanation_payload:
-                    self._store_explanation(explanation_payload[0], text_idx, explanation_payload[1])
-
-                return scaled_scores
+                scores = _apply_measurement_scale(scores, st.session_state.measurement_scale)
+                
+                # Store explanation if present
+                if explanation and st.session_state.explain_mode != "None":
+                    if "GPT-4o (fallback)" not in st.session_state.explanations:
+                        st.session_state.explanations["GPT-4o (fallback)"] = {}
+                    st.session_state.explanations["GPT-4o (fallback)"][text_idx] = explanation
+                
+                return scores
 
         except Exception as e:
             st.error(f"OpenAI analysis failed: {e}")
@@ -1151,48 +1010,22 @@ def main() -> None:
         
         for model in models_to_run:
             status.text(f"Running {model}...")
-            model_results: List[Dict[str, float]] = [
-                {"positive": 0.0, "negative": 0.0, "neutral": 0.0} if mode == "valence" else {
-                    "happiness": 0.0,
-                    "sadness": 0.0,
-                    "fear": 0.0,
-                    "anger": 0.0,
-                    "disgust": 0.0,
-                    "contempt": 0.0,
-                    "surprise": 0.0,
-                }
-                for _ in texts
-            ]
-
-            max_workers = max(1, min(4, len(texts)))
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_map = {
-                    executor.submit(analyzer.analyze_text, t, model, api_keys, mode, idx): idx
-                    for idx, t in enumerate(texts)
-                }
-                for future in as_completed(future_map):
-                    idx = future_map[future]
-                    try:
-                        scores = future.result()
-                    except Exception as e:
-                        st.error(f"{model} failed on text {idx+1}: {e}")
-                        if st.session_state.debug_mode:
-                            st.exception(e)
-                        if mode == "valence":
-                            scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
-                        else:
-                            scores = {
-                                "happiness": 0.0,
-                                "sadness": 0.0,
-                                "fear": 0.0,
-                                "anger": 0.0,
-                                "disgust": 0.0,
-                                "contempt": 0.0,
-                                "surprise": 0.0,
-                            }
-                    model_results[idx] = scores
-                    op += 1
-                    progress.progress(op / total_ops)
+            model_results: List[Dict[str, float]] = []
+            for idx, t in enumerate(texts):
+                try:
+                    scores = analyzer.analyze_text(t, model, api_keys, mode, idx)
+                except Exception as e:
+                    st.error(f"{model} failed on text {idx+1}: {e}")
+                    if st.session_state.debug_mode:
+                        st.exception(e)
+                    if mode == "valence":
+                        scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
+                    else:
+                        scores = {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
+                                "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
+                model_results.append(scores)
+                op += 1
+                progress.progress(op / total_ops)
             results[model] = model_results
         
         progress.empty()
