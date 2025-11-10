@@ -346,27 +346,27 @@ class SentimentAnalyzer:
             return {"positive": 0.0, "negative": 0.0, "neutral": 0.0, "compound": 0.0}
 
     # ---------------- Hugging Face (requests) ----------------
-    def analyze_siebert(self, text: str, api_key: str) -> Dict[str, float]:
-        """Analyze sentiment using SiEBERT via Hugging Face Inference API (valence only)."""
+    def analyze_cardiffnlp(self, text: str, api_key: str) -> Dict[str, float]:
+        """Analyze sentiment using Cardiff NLP's RoBERTa model via Hugging Face Inference API (valence only)."""
         try:
             if not api_key:
-                st.error("Hugging Face API key required for SiEBERT")
+                st.error("Hugging Face API key required for Cardiff NLP")
                 return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
 
-            api_url = "https://api-inference.huggingface.co/models/siebert/sentiment-roberta-large-english"
+            api_url = "https://api-inference.huggingface.co/models/cardiffnlp/twitter-roberta-base-sentiment-latest"
             headers = {"Authorization": f"Bearer {api_key}"}
             response = requests.post(api_url, headers=headers, json={"inputs": text[:512]}, timeout=60)
 
             if response.status_code == 503:
-                st.warning("SiEBERT model is loading on HF. Try again in a few seconds.")
-                return {"positive": 0.5, "negative": 0.5, "neutral": 0.0}
+                st.warning("Cardiff NLP model is loading on HF. Try again in a few seconds.")
+                return {"positive": 0.33, "negative": 0.33, "neutral": 0.34}
             response.raise_for_status()
 
             result = response.json()
             if st.session_state.debug_mode:
-                st.code(f"SiEBERT raw response:\n{json.dumps(result, indent=2)}")
+                st.code(f"Cardiff NLP raw response:\n{json.dumps(result, indent=2)}")
 
-            # HF output formats: [[{label,score}]] or [{label,score}]
+            # Cardiff NLP returns: [[{label, score}]] or [{label, score}]
             result_item = {}
             if isinstance(result, list) and result:
                 result_item = result[0][0] if isinstance(result[0], list) and result[0] else result[0]
@@ -374,35 +374,39 @@ class SentimentAnalyzer:
                 result_item = result
 
             label = str(result_item.get("label", "")).lower()
-            score = _clip01(float(result_item.get("score", 0.5)))
+            score = _clip01(float(result_item.get("score", 0.33)))
 
+            # Cardiff NLP uses labels: negative, neutral, positive
             if "positive" in label:
-                return {"positive": score, "negative": _clip01(1 - score), "neutral": 0.0}
-            if "negative" in label:
-                return {"negative": score, "positive": _clip01(1 - score), "neutral": 0.0}
+                return {"positive": score, "negative": 0.0, "neutral": _clip01(1 - score)}
+            elif "negative" in label:
+                return {"negative": score, "positive": 0.0, "neutral": _clip01(1 - score)}
+            elif "neutral" in label:
+                return {"neutral": score, "positive": 0.0, "negative": _clip01(1 - score)}
+            
             return {"positive": 0.33, "negative": 0.33, "neutral": 0.34}
 
         except Exception as e:
-            st.error(f"SiEBERT analysis failed: {e}")
+            st.error(f"Cardiff NLP analysis failed: {e}")
             if st.session_state.debug_mode:
                 st.exception(e)
             return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
 
-    def analyze_bart(self, text: str, api_key: str, mode: str = "valence") -> Dict[str, float]:
+    def analyze_deberta(self, text: str, api_key: str, mode: str = "valence") -> Dict[str, float]:
         """
-        Analyze sentiment using BART (MNLI) via Hugging Face Inference API.
+        Analyze sentiment using DeBERTa-v3 (MNLI) via Hugging Face Inference API.
         Supports both valence and Ekman emotions modes.
         """
         try:
             if not api_key:
-                st.error("Hugging Face API key required for BART")
+                st.error("Hugging Face API key required for DeBERTa")
                 if mode == "valence":
                     return {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
                 else:
                     return {"happiness": 0.0, "sadness": 0.0, "fear": 0.0, "anger": 0.0, 
                            "disgust": 0.0, "contempt": 0.0, "surprise": 0.0}
 
-            api_url = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
+            api_url = "https://api-inference.huggingface.co/models/MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
             headers = {"Authorization": f"Bearer {api_key}"}
             
             if mode == "valence":
@@ -417,7 +421,7 @@ class SentimentAnalyzer:
             response = requests.post(api_url, headers=headers, json=payload, timeout=60)
 
             if response.status_code == 503:
-                st.warning("BART model is loading on HF. Try again shortly.")
+                st.warning("DeBERTa model is loading on HF. Try again shortly.")
                 if mode == "valence":
                     return {"positive": 0.33, "negative": 0.33, "neutral": 0.34}
                 else:
@@ -427,7 +431,7 @@ class SentimentAnalyzer:
 
             result = response.json()
             if st.session_state.debug_mode:
-                st.code(f"BART raw response:\n{json.dumps(result, indent=2)}")
+                st.code(f"DeBERTa raw response:\n{json.dumps(result, indent=2)}")
 
             scores_map: Dict[str, float] = {label: 0.0 for label in labels}
             blob = result[0] if isinstance(result, list) and result else result
@@ -439,7 +443,7 @@ class SentimentAnalyzer:
             return scores_map
 
         except Exception as e:
-            st.error(f"BART analysis failed: {e}")
+            st.error(f"DeBERTa analysis failed: {e}")
             if st.session_state.debug_mode:
                 st.exception(e)
             if mode == "valence":
@@ -693,10 +697,10 @@ class SentimentAnalyzer:
         """Dispatch to the selected model."""
         if model == "VADER":
             return self.analyze_vader(text)
-        if model == "SiEBERT":
-            return self.analyze_siebert(text, api_keys.get("Entresent_HF_API", ""))
-        if model == "BART":
-            return self.analyze_bart(text, api_keys.get("Entresent_HF_API", ""), mode)
+        if model == "Cardiff NLP":
+            return self.analyze_cardiffnlp(text, api_keys.get("Entresent_HF_API", ""))
+        if model == "DeBERTa-MNLI":
+            return self.analyze_deberta(text, api_keys.get("Entresent_HF_API", ""), mode)
         if model == "DeepSeek":
             return self.analyze_deepseek(text, api_keys.get("Entresent_DS_API", ""), mode, text_idx)
         if model == "GPT-5 nano":
@@ -798,9 +802,9 @@ def main() -> None:
         st.subheader("2. Model Selection")
         
         if analysis_mode == "Valence":
-            available_models = ["VADER", "SiEBERT", "BART", "DeepSeek", "GPT-5 nano"]
+            available_models = ["VADER", "Cardiff NLP", "DeBERTa-MNLI", "DeepSeek", "GPT-5 nano"]
         else:  # Ekman Emotions
-            available_models = ["BART", "DeepSeek", "GPT-5 nano"]
+            available_models = ["DeBERTa-MNLI", "DeepSeek", "GPT-5 nano"]
         
         benchmark_mode = st.checkbox("🏁 Benchmark Mode (Run all available models)", value=False)
         
@@ -840,14 +844,14 @@ def main() -> None:
         if analysis_mode == "Valence":
             models_status = [
                 "✅ VADER" if "VADER" in available_models else "",
-                "✅ SiEBERT" if api_keys.get("Entresent_HF_API") and "SiEBERT" in available_models else "❌ SiEBERT",
-                "✅ BART" if api_keys.get("Entresent_HF_API") and "BART" in available_models else "❌ BART",
+                "✅ Cardiff NLP" if api_keys.get("Entresent_HF_API") and "Cardiff NLP" in available_models else "❌ Cardiff NLP",
+                "✅ DeBERTa-MNLI" if api_keys.get("Entresent_HF_API") and "DeBERTa-MNLI" in available_models else "❌ DeBERTa-MNLI",
                 "✅ DeepSeek" if api_keys.get("Entresent_DS_API") else "⚠️ DeepSeek",
                 "✅ GPT-5 nano" if api_keys.get("Entresent_OAI_API") else "⚠️ GPT-5 nano",
             ]
         else:
             models_status = [
-                "✅ BART" if api_keys.get("Entresent_HF_API") else "❌ BART",
+                "✅ DeBERTa-MNLI" if api_keys.get("Entresent_HF_API") else "❌ DeBERTa-MNLI",
                 "✅ DeepSeek" if api_keys.get("Entresent_DS_API") else "⚠️ DeepSeek",
                 "✅ GPT-5 nano" if api_keys.get("Entresent_OAI_API") else "⚠️ GPT-5 nano",
             ]
@@ -965,14 +969,14 @@ def main() -> None:
     # Check for missing keys
     missing_keys = []
     if not benchmark_mode:
-        if selected_model in ["SiEBERT", "BART"] and not api_keys.get("Entresent_HF_API"):
+        if selected_model in ["Cardiff NLP", "DeBERTa-MNLI"] and not api_keys.get("Entresent_HF_API"):
             missing_keys.append(f"Hugging Face API key (for {selected_model})")
         if selected_model == "DeepSeek" and not api_keys.get("Entresent_DS_API"):
             missing_keys.append("DeepSeek API key")
         if selected_model == "GPT-5 nano" and not api_keys.get("Entresent_OAI_API"):
             missing_keys.append("OpenAI API key")
     else:
-        if "BART" in models_to_run and not api_keys.get("Entresent_HF_API"):
+        if "DeBERTa-MNLI" in models_to_run and not api_keys.get("Entresent_HF_API"):
             missing_keys.append("Hugging Face API key")
         if "DeepSeek" in models_to_run and not api_keys.get("Entresent_DS_API"):
             missing_keys.append("DeepSeek API key")
